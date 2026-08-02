@@ -15,6 +15,7 @@ const (
 // EtherTypes used by the builders.
 const (
 	EtherTypeIPv4 = 0x0800
+	EtherTypeIPv6 = 0x86DD
 	EtherTypeVLAN = 0x8100
 )
 
@@ -23,6 +24,7 @@ const (
 	EthHeaderLen  = 14
 	VLANTagLen    = 4
 	IPv4HeaderLen = 20
+	IPv6HeaderLen = 40
 	UDPHeaderLen  = 8
 	TCPHeaderLen  = 20
 )
@@ -33,8 +35,9 @@ const (
 type Layout struct {
 	HasVLAN bool
 	HasIP   bool
+	Is6     bool // IPv6 rather than IPv4
 
-	L3Off int // start of the IPv4 header (or of the raw payload)
+	L3Off int // start of the IP header (or of the raw payload)
 	L4Off int // start of the UDP/TCP header
 
 	SrcIPOff   int
@@ -81,7 +84,7 @@ type Template struct {
 	buf []byte
 	lay Layout
 
-	srcIP, dstIP     [4]byte
+	srcIP, dstIP     netip.Addr
 	srcPort, dstPort uint16
 	frameLen         int
 	payloadByte      byte
@@ -94,6 +97,9 @@ func Build(s Spec) (*Template, error) {
 	}
 	if s.EtherType != 0 {
 		return buildRaw(s)
+	}
+	if s.SrcIP.Is6() || s.DstIP.Is6() {
+		return buildIPv6(s)
 	}
 	return buildIPv4(s)
 }
@@ -161,8 +167,8 @@ func buildIPv4(s Spec) (*Template, error) {
 	t := &Template{
 		buf:         make([]byte, s.Cap),
 		lay:         lay,
-		srcIP:       s.SrcIP.As4(),
-		dstIP:       s.DstIP.As4(),
+		srcIP:       s.SrcIP.Unmap(),
+		dstIP:       s.DstIP.Unmap(),
 		srcPort:     s.SrcPort,
 		dstPort:     s.DstPort,
 		frameLen:    s.FrameLen,
@@ -178,14 +184,15 @@ func buildIPv4(s Spec) (*Template, error) {
 	if ttl == 0 {
 		ttl = 64
 	}
+	s4, d4 := t.srcIP.As4(), t.dstIP.As4()
 	ip := b[lay.L3Off:]
 	ip[0] = 0x45 // version 4, IHL 5 (no options)
 	ip[1] = 0    // DSCP/ECN
 	binary.BigEndian.PutUint16(ip[2:], uint16(s.FrameLen-lay.L3Off))
 	ip[8] = ttl
 	ip[9] = s.Proto
-	copy(ip[12:16], t.srcIP[:])
-	copy(ip[16:20], t.dstIP[:])
+	copy(ip[12:16], s4[:])
+	copy(ip[16:20], d4[:])
 
 	// L4 header.
 	l4 := b[lay.L4Off:]
@@ -203,6 +210,98 @@ func buildIPv4(s Spec) (*Template, error) {
 	fill(b[lay.HeaderLen:], s.PayloadByte)
 	t.recomputeIPChecksum()
 	t.recomputeL4Checksum()
+	return t, nil
+}
+
+// buildIPv6 makes an Ethernet + optional 802.1Q + IPv6 + UDP/TCP frame.
+//
+// Two things differ from IPv4 and matter here. The IPv6 header has no checksum
+// of its own, so there is nothing to maintain at L3. And the UDP checksum is
+// mandatory over IPv6 (it may not be left at zero the way we do for IPv4), so
+// L4CksumOff is set for UDP as well as TCP, and the port and address mutators
+// maintain it incrementally.
+func buildIPv6(s Spec) (*Template, error) {
+	src, dst := s.SrcIP.Unmap(), s.DstIP.Unmap()
+	if !src.Is6() || !dst.Is6() {
+		return nil, fmt.Errorf("packet: src %s and dst %s must both be IPv6", s.SrcIP, s.DstIP)
+	}
+	if s.Proto != ProtoUDP && s.Proto != ProtoTCP {
+		return nil, fmt.Errorf("packet: unsupported IP protocol %d (want %d UDP or %d TCP)",
+			s.Proto, ProtoUDP, ProtoTCP)
+	}
+
+	lay := ethLayout(s.VLAN != 0)
+	lay.HasIP = true
+	lay.Is6 = true
+	lay.L4Off = lay.L3Off + IPv6HeaderLen
+	lay.IPLenOff = lay.L3Off + 4 // payload length (everything after the 40-byte header)
+	lay.IPCksumOff = -1          // IPv6 has no header checksum
+	lay.SrcIPOff = lay.L3Off + 8
+	lay.DstIPOff = lay.L3Off + 24
+	lay.SrcPortOff = lay.L4Off
+	lay.DstPortOff = lay.L4Off + 2
+	lay.Proto = s.Proto
+
+	switch s.Proto {
+	case ProtoUDP:
+		lay.HeaderLen = lay.L4Off + UDPHeaderLen
+		lay.L4LenOff = lay.L4Off + 4
+		lay.L4CksumOff = lay.L4Off + 6 // mandatory over IPv6
+	case ProtoTCP:
+		lay.HeaderLen = lay.L4Off + TCPHeaderLen
+		lay.L4LenOff = -1
+		lay.L4CksumOff = lay.L4Off + 16
+	}
+
+	if s.FrameLen < lay.HeaderLen {
+		return nil, fmt.Errorf("packet: frame length %d is smaller than the %d-byte header",
+			s.FrameLen, lay.HeaderLen)
+	}
+	if s.Cap < lay.HeaderLen {
+		s.Cap = lay.HeaderLen
+	}
+
+	t := &Template{
+		buf:         make([]byte, s.Cap),
+		lay:         lay,
+		srcIP:       src,
+		dstIP:       dst,
+		srcPort:     s.SrcPort,
+		dstPort:     s.DstPort,
+		frameLen:    s.FrameLen,
+		payloadByte: s.PayloadByte,
+	}
+	b := t.buf
+
+	writeEthernet(b, s, EtherTypeIPv6)
+
+	hop := s.TTL
+	if hop == 0 {
+		hop = 64
+	}
+	s16, d16 := src.As16(), dst.As16()
+	ip := b[lay.L3Off:]
+	ip[0] = 0x60 // version 6, traffic class 0
+	ip[1], ip[2], ip[3] = 0, 0, 0
+	binary.BigEndian.PutUint16(ip[4:], uint16(s.FrameLen-lay.L4Off)) // payload length
+	ip[6] = s.Proto                                                  // next header
+	ip[7] = hop
+	copy(ip[8:24], s16[:])
+	copy(ip[24:40], d16[:])
+
+	l4 := b[lay.L4Off:]
+	binary.BigEndian.PutUint16(l4[0:], s.SrcPort)
+	binary.BigEndian.PutUint16(l4[2:], s.DstPort)
+	if s.Proto == ProtoUDP {
+		binary.BigEndian.PutUint16(l4[4:], uint16(s.FrameLen-lay.L4Off))
+	} else {
+		l4[12] = 5 << 4 // data offset, no options
+		l4[13] = 0x02   // SYN
+		binary.BigEndian.PutUint16(l4[14:], 64240)
+	}
+
+	fill(b[lay.HeaderLen:], s.PayloadByte)
+	t.recomputeL4Checksum() // no IP checksum on IPv6
 	return t, nil
 }
 
@@ -251,30 +350,63 @@ func (t *Template) WriteTo(dst []byte) int {
 	return copy(dst, t.buf[:t.frameLen])
 }
 
-// SetSrcIP changes the source address, repairing the IPv4 header checksum and,
-// for TCP, the pseudo-header part of the L4 checksum. It is a no-op for a
-// non-IP template.
-func (t *Template) SetSrcIP(ip [4]byte) {
+// SetSrcIP changes the source address, repairing the IPv4 header checksum (IPv6
+// has none) and, wherever an L4 checksum is maintained, its pseudo-header part.
+// It is a no-op for a non-IP template. The address family must match the one the
+// template was built for.
+func (t *Template) SetSrcIP(ip netip.Addr) {
 	if !t.lay.HasIP || ip == t.srcIP {
 		return
 	}
 	old := t.srcIP
 	t.srcIP = ip
-	copy(t.buf[t.lay.SrcIPOff:], ip[:])
-	t.patchIPChecksum(func(c uint16) uint16 { return ReplaceU32(c, old, ip) })
-	t.patchL4Checksum(func(c uint16) uint16 { return ReplaceU32(c, old, ip) })
+	t.writeAddr(t.lay.SrcIPOff, ip)
+	if t.lay.Is6 {
+		t.patchL4Checksum(func(c uint16) uint16 { return replaceAddr6(c, old, ip) })
+		return
+	}
+	o, n := old.As4(), ip.As4()
+	t.patchIPChecksum(func(c uint16) uint16 { return ReplaceU32(c, o, n) })
+	t.patchL4Checksum(func(c uint16) uint16 { return ReplaceU32(c, o, n) })
 }
 
 // SetDstIP changes the destination address, repairing the same checksums.
-func (t *Template) SetDstIP(ip [4]byte) {
+func (t *Template) SetDstIP(ip netip.Addr) {
 	if !t.lay.HasIP || ip == t.dstIP {
 		return
 	}
 	old := t.dstIP
 	t.dstIP = ip
-	copy(t.buf[t.lay.DstIPOff:], ip[:])
-	t.patchIPChecksum(func(c uint16) uint16 { return ReplaceU32(c, old, ip) })
-	t.patchL4Checksum(func(c uint16) uint16 { return ReplaceU32(c, old, ip) })
+	t.writeAddr(t.lay.DstIPOff, ip)
+	if t.lay.Is6 {
+		t.patchL4Checksum(func(c uint16) uint16 { return replaceAddr6(c, old, ip) })
+		return
+	}
+	o, n := old.As4(), ip.As4()
+	t.patchIPChecksum(func(c uint16) uint16 { return ReplaceU32(c, o, n) })
+	t.patchL4Checksum(func(c uint16) uint16 { return ReplaceU32(c, o, n) })
+}
+
+// writeAddr copies an address into the buffer at off: 4 bytes for IPv4, 16 for
+// IPv6, chosen by the template's family.
+func (t *Template) writeAddr(off int, a netip.Addr) {
+	if t.lay.Is6 {
+		b := a.As16()
+		copy(t.buf[off:], b[:])
+		return
+	}
+	b := a.As4()
+	copy(t.buf[off:], b[:])
+}
+
+// replaceAddr6 updates a checksum for a 128-bit address change, as four 32-bit
+// incremental replacements (RFC 1624).
+func replaceAddr6(c uint16, old, new netip.Addr) uint16 {
+	o, n := old.As16(), new.As16()
+	for i := 0; i < 16; i += 4 {
+		c = ReplaceU32(c, [4]byte(o[i:i+4]), [4]byte(n[i:i+4]))
+	}
+	return c
 }
 
 // SetSrcPort changes the L4 source port. The IPv4 header checksum does not
@@ -325,14 +457,24 @@ func (t *Template) SetFrameLen(n int) error {
 		return nil
 	}
 
-	oldIPLen := uint16(old - t.lay.L3Off)
-	newIPLen := uint16(n - t.lay.L3Off)
-	binary.BigEndian.PutUint16(t.buf[t.lay.IPLenOff:], newIPLen)
-	t.patchIPChecksum(func(c uint16) uint16 { return ReplaceU16(c, oldIPLen, newIPLen) })
+	if t.lay.Is6 {
+		// IPv6's length field is the payload length (everything after the fixed
+		// 40-byte header), and there is no IP header checksum to repair.
+		binary.BigEndian.PutUint16(t.buf[t.lay.IPLenOff:], uint16(n-t.lay.L4Off))
+	} else {
+		oldIPLen := uint16(old - t.lay.L3Off)
+		newIPLen := uint16(n - t.lay.L3Off)
+		binary.BigEndian.PutUint16(t.buf[t.lay.IPLenOff:], newIPLen)
+		t.patchIPChecksum(func(c uint16) uint16 { return ReplaceU16(c, oldIPLen, newIPLen) })
+	}
 
 	if t.lay.L4LenOff >= 0 {
 		binary.BigEndian.PutUint16(t.buf[t.lay.L4LenOff:], uint16(n-t.lay.L4Off))
 	}
+	// A size change moves both the pseudo-header length and which payload bytes
+	// the checksum covers, so where an L4 checksum is maintained it is recomputed
+	// in full. IPv4 UDP keeps its checksum at zero and skips this; IPv6 UDP must
+	// not, so an IMIX over IPv6 pays this per size change.
 	if t.lay.L4CksumOff >= 0 {
 		t.recomputeL4Checksum()
 	}
@@ -366,19 +508,29 @@ func (t *Template) recomputeIPChecksum() {
 	binary.BigEndian.PutUint16(t.buf[t.lay.IPCksumOff:], Checksum(hdr))
 }
 
-// recomputeL4Checksum recalculates the TCP checksum over the pseudo-header,
-// the TCP header and the payload. UDP is left at zero.
+// recomputeL4Checksum recalculates the L4 checksum over the pseudo-header, the
+// L4 header and the payload. It runs only where a checksum is maintained (TCP
+// for both families, and UDP over IPv6); IPv4 UDP leaves L4CksumOff unset and
+// keeps its checksum at zero.
 func (t *Template) recomputeL4Checksum() {
 	if t.lay.L4CksumOff < 0 {
 		return
 	}
 	l4 := t.buf[t.lay.L4Off:t.frameLen]
 	binary.BigEndian.PutUint16(t.buf[t.lay.L4CksumOff:], 0)
-	sum := PseudoHeaderSum(t.srcIP, t.dstIP, t.lay.Proto, len(l4))
+	var sum uint32
+	if t.lay.Is6 {
+		sum = PseudoHeaderSum6(t.srcIP.As16(), t.dstIP.As16(), t.lay.Proto, len(l4))
+	} else {
+		sum = PseudoHeaderSum(t.srcIP.As4(), t.dstIP.As4(), t.lay.Proto, len(l4))
+	}
 	sum = partialSum(l4, sum)
 	c := ^foldSum(sum)
-	// A transmitted TCP checksum of zero is legal but confusing; it is also
-	// what a receiver sees as "no checksum" for UDP. TCP has no such rule, so
-	// leave the computed value as-is.
+	// Over IPv6 a UDP checksum of zero is illegal (it means "no checksum"), so a
+	// computed zero is transmitted as 0xFFFF instead (RFC 8200 section 8.1). TCP
+	// has no such rule, and IPv4 UDP never reaches here.
+	if c == 0 && t.lay.Is6 && t.lay.Proto == ProtoUDP {
+		c = 0xffff
+	}
 	binary.BigEndian.PutUint16(t.buf[t.lay.L4CksumOff:], c)
 }

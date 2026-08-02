@@ -9,14 +9,15 @@ package generator
 
 import (
 	"encoding/binary"
+	"math"
 	"net/netip"
 )
 
 // Flow is one flow's tuple. The other tuple components — IP protocol and VLAN
 // ID — are fixed for a run and live in the packet template.
 type Flow struct {
-	SrcIP   [4]byte
-	DstIP   [4]byte
+	SrcIP   netip.Addr
+	DstIP   netip.Addr
 	SrcPort uint16
 	DstPort uint16
 }
@@ -57,8 +58,8 @@ func (s FlowSpec) At(n int) Flow {
 	}
 
 	f := Flow{
-		SrcIP:   s.SrcIP.As4(),
-		DstIP:   nthUsable(s.Dst, n),
+		SrcIP:   s.SrcIP,
+		DstIP:   nthAddr(s.Dst, n),
 		SrcPort: portAt(s.SrcPort, n),
 		DstPort: s.DstPort,
 	}
@@ -79,6 +80,43 @@ func portAt(start uint16, n int) uint16 {
 		return 1
 	}
 	return p
+}
+
+// nthAddr returns the n-th usable address in a prefix, cycling, for either
+// family. IPv4 skips the network and broadcast addresses; IPv6 has no such
+// reservations.
+func nthAddr(p netip.Prefix, n int) netip.Addr {
+	if p.Addr().Is4() {
+		return netip.AddrFrom4(nthUsable(p, n))
+	}
+	return nthUsable6(p, n)
+}
+
+// nthUsable6 returns the n-th address in an IPv6 prefix, cycling. IPv6 has no
+// network or broadcast address to skip, so it is simply base + (n mod size),
+// where the offset is added to the low 64 bits with a carry into the upper 64.
+func nthUsable6(p netip.Prefix, n int) netip.Addr {
+	base := p.Masked().Addr().As16()
+	off := uint64(n) % usable6(p)
+	lo := binary.BigEndian.Uint64(base[8:])
+	sum := lo + off
+	binary.BigEndian.PutUint64(base[8:], sum)
+	if sum < lo { // carry: only possible when the prefix is shorter than /64
+		hi := binary.BigEndian.Uint64(base[0:])
+		binary.BigEndian.PutUint64(base[0:], hi+1)
+	}
+	return netip.AddrFrom16(base)
+}
+
+// usable6 is how many distinct addresses an IPv6 prefix contributes. A /64 or
+// shorter has more than 2^64, which is unbounded for any counter we cycle, so
+// it is reported as the max uint64.
+func usable6(p netip.Prefix) uint64 {
+	hostBits := 128 - p.Bits()
+	if hostBits >= 64 {
+		return math.MaxUint64
+	}
+	return uint64(1) << hostBits
 }
 
 // nthUsable returns the n-th usable address in a prefix, cycling.
@@ -110,16 +148,17 @@ func nthUsable(p netip.Prefix, n int) [4]byte {
 }
 
 // UsableAddresses reports how many destination addresses a prefix contributes,
-// following the same network/broadcast rules as nthUsable. It is used to tell
-// the user how many distinct destinations a CIDR really provides.
-func UsableAddresses(p netip.Prefix) uint32 {
+// following the same network/broadcast rules as the per-family steppers. It is
+// used to tell the user how many distinct destinations a CIDR really provides.
+// An IPv6 prefix of /64 or shorter is reported as the max uint64.
+func UsableAddresses(p netip.Prefix) uint64 {
 	if !p.Addr().Is4() {
-		return 0
+		return usable6(p)
 	}
 	if p.Bits() >= 31 {
-		return uint32(1) << (32 - p.Bits())
+		return uint64(1) << (32 - p.Bits())
 	}
-	return (uint32(1) << (32 - p.Bits())) - 2
+	return (uint64(1) << (32 - p.Bits())) - 2
 }
 
 // queueCursor walks a queue's share of the flow space.

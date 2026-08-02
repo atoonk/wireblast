@@ -52,6 +52,18 @@ func PseudoHeaderSum(srcIP, dstIP [4]byte, proto uint8, l4Len int) uint32 {
 	return sum
 }
 
+// PseudoHeaderSum6 returns the unfolded partial sum of the IPv6 pseudo-header
+// used by UDP and TCP (RFC 8200 section 8.1): the 128-bit source and
+// destination addresses, a 32-bit upper-layer packet length, and the
+// next-header value (the three bytes before it are zero and contribute nothing).
+func PseudoHeaderSum6(srcIP, dstIP [16]byte, nextHdr uint8, l4Len int) uint32 {
+	sum := partialSum(srcIP[:], 0)
+	sum = partialSum(dstIP[:], sum)
+	sum += uint32(l4Len)
+	sum += uint32(nextHdr)
+	return sum
+}
+
 // ReplaceU16 returns the checksum csum updated for a 16-bit header field whose
 // value changed from old to new, without rescanning the packet.
 //

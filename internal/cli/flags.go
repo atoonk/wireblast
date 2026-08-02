@@ -9,6 +9,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -81,9 +82,9 @@ in L1, so --bps 10G means 10G line rate.`,
 		"traffic pattern: "+modeList())
 
 	f.StringVar(&cfg.SrcIP, "src-ip", cfg.SrcIP,
-		"source IPv4 address (default: an address of the selected interface)")
+		"source IPv4 or IPv6 address (default: an address of the selected interface)")
 	f.StringVar(&cfg.DstIP, "dst-ip", cfg.DstIP,
-		"destination IPv4 address or CIDR (a CIDR cycles destinations across flows)")
+		"destination IPv4 or IPv6 address or CIDR (a CIDR cycles destinations across flows)")
 	f.StringVar(&cfg.SrcMAC, "src-mac", cfg.SrcMAC,
 		"source MAC address (default: the selected interface's MAC)")
 	f.StringVar(&cfg.DstMAC, "dst-mac", cfg.DstMAC,
@@ -208,19 +209,21 @@ func applyOptions(cmd *cobra.Command, cfg *config.Config, opt *options) error {
 }
 
 func parseEtherType(s string) (int, error) {
-	s = strings.TrimSpace(strings.ToLower(s))
+	s = strings.TrimSpace(s)
 	base := 10
-	if strings.HasPrefix(s, "0x") {
+	if strings.HasPrefix(strings.ToLower(s), "0x") {
 		s, base = s[2:], 16
 	}
-	var v int
-	if _, err := fmt.Sscanf(s, map[int]string{10: "%d", 16: "%x"}[base], &v); err != nil {
+	// ParseUint rejects trailing junk (unlike Sscanf, which stops at the first
+	// non-digit), so "0x88b5zzz" is an error rather than 0x88b5.
+	v, err := strconv.ParseUint(s, base, 32)
+	if err != nil {
 		return 0, fmt.Errorf("%q is not a number", s)
 	}
-	if v < 0 || v > 0xffff {
+	if v > 0xffff {
 		return 0, fmt.Errorf("0x%x is out of range", v)
 	}
-	return v, nil
+	return int(v), nil
 }
 
 func modeList() string {

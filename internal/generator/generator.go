@@ -108,11 +108,12 @@ type flowGen struct {
 
 func newFlowGen(s Spec, proto uint8, mix []MixEntry) (*flowGen, error) {
 	cfg := s.Cfg
-	if !s.SrcIP.Is4() {
-		return nil, fmt.Errorf("generator: source address %s is not IPv4", s.SrcIP)
+	if !s.SrcIP.IsValid() || !s.Dst.IsValid() {
+		return nil, fmt.Errorf("generator: source and destination addresses must be set")
 	}
-	if !s.Dst.Addr().Is4() {
-		return nil, fmt.Errorf("generator: destination %s is not IPv4", s.Dst)
+	if s.SrcIP.Is4() != s.Dst.Addr().Is4() {
+		return nil, fmt.Errorf("generator: source %s and destination %s are different address families",
+			s.SrcIP, s.Dst)
 	}
 
 	g := &flowGen{
@@ -139,22 +140,29 @@ func newFlowGen(s Spec, proto uint8, mix []MixEntry) (*flowGen, error) {
 	frameLen := config.FrameBytes(cfg.PacketSize)
 	maxFrame := frameLen
 	if mix != nil {
-		// A tagged frame cannot go on the wire below 68 bytes; the NIC pads
-		// anything smaller. IMIX's 64-byte component would therefore leave as 68
-		// while every count still said 64, understating the real average. Raise
-		// the floor so the frames built, the sizes reported and the bytes on the
-		// wire all agree. The mix drives the size entirely here, so --packet-size
-		// plays no part (it is not even range-checked for IMIX).
-		effMix := mix
+		// Raise any mix entry below the smallest frame this family and tagging
+		// can actually put on the wire, so the frames built, the sizes reported
+		// and the bytes on the wire all agree. Two floors combine: a tagged frame
+		// cannot go below 68 (the NIC pads anything smaller), and an IPv6 frame
+		// needs 20 more header bytes than IPv4. The mix drives the size entirely
+		// here, so --packet-size plays no part (it is not even range-checked).
+		minTotal := config.MinPacketSize
+		hdr := packet.EthHeaderLen + packet.IPv4HeaderLen + packet.UDPHeaderLen + config.FCSLen
+		if !s.SrcIP.Is4() {
+			hdr += packet.IPv6HeaderLen - packet.IPv4HeaderLen
+		}
 		if cfg.VLAN != 0 {
-			minTotal := config.MinPacketSize + config.VLANTagLen
-			effMix = make([]MixEntry, len(mix))
-			for i, e := range mix {
-				if e.Size < minTotal {
-					e.Size = minTotal
-				}
-				effMix[i] = e
+			minTotal += config.VLANTagLen
+			hdr += config.VLANTagLen
+		}
+		minTotal = max(minTotal, hdr)
+
+		effMix := make([]MixEntry, len(mix))
+		for i, e := range mix {
+			if e.Size < minTotal {
+				e.Size = minTotal
 			}
+			effMix[i] = e
 		}
 		sizes, err := ExpandMix(effMix)
 		if err != nil {
@@ -177,7 +185,7 @@ func newFlowGen(s Spec, proto uint8, mix []MixEntry) (*flowGen, error) {
 		SrcMAC: s.SrcMAC, DstMAC: s.DstMAC,
 		VLAN:        uint16(cfg.VLAN),
 		SrcIP:       s.SrcIP,
-		DstIP:       netip.AddrFrom4(first.DstIP),
+		DstIP:       first.DstIP,
 		Proto:       proto,
 		SrcPort:     first.SrcPort,
 		DstPort:     first.DstPort,

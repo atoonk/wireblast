@@ -29,6 +29,11 @@ func TestParsePPS(t *testing.T) {
 		{"fast", 0, true},
 		{"1X", 0, true},
 		{"-5", 0, true},
+		// Overflow must error, not wrap to a garbage rate: the integer path
+		// where n fits uint64 but n*mult does not, and the raw-integer path.
+		{"18446744073t", 0, true},         // 1.8e10 * 1e12 > 2^64
+		{"99999999999999999999", 0, true}, // 20 digits, exceeds uint64 on its own
+		{"1e40", 0, true},                 // float path overflow
 	}
 	for _, tt := range tests {
 		got, err := ParsePPS(tt.in)
@@ -107,11 +112,19 @@ func TestParseDst(t *testing.T) {
 		{"10.0.0.0/24", "10.0.0.0/24", false},
 		{"10.0.0.5/24", "10.0.0.0/24", false}, // masked
 		{"10.0.0.1/32", "10.0.0.1/32", false},
-		{"2001:db8::1", "", true},
-		{"2001:db8::/32", "", true},
+		{"2001:db8::1", "2001:db8::1/128", false},
+		{"2001:db8::/32", "2001:db8::/32", false},
+		{"2001:db8::5/64", "2001:db8::/64", false}, // masked
 		{"", "", true},
 		{"nope", "", true},
 		{"10.0.0.0/33", "", true},
+		// A v4-mapped v6 address collapses to plain v4, so a prefix length past
+		// /32 is nonsense and must be rejected, not silently turned into the zero
+		// prefix (which used to slip past validation as "addresses must be set").
+		{"::ffff:10.0.0.0", "10.0.0.0/32", false},
+		{"::ffff:10.0.0.0/24", "10.0.0.0/24", false},
+		{"::ffff:10.0.0.0/104", "", true},
+		{"::ffff:1.2.3.4/120", "", true},
 	}
 	for _, tt := range tests {
 		got, err := ParseDst(tt.in)

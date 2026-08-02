@@ -43,7 +43,7 @@ type field struct {
 
 func (f field) visible(c *config.Config) bool { return f.show == nil || f.show(c) }
 
-// usesIP is true for the modes that build IPv4 packets.
+// usesIP is true for the modes that build IP packets.
 func usesIP(c *config.Config) bool { return c.UsesIPStack() }
 
 // allFields is the full catalogue, in the order the form presents them:
@@ -72,7 +72,7 @@ var allFields = []field{
 		get:  func(c *config.Config) string { return c.SrcIP },
 		set: func(c *config.Config, v string) error {
 			if v = strings.TrimSpace(v); v != "" {
-				if _, err := config.ParseIPv4(v); err != nil {
+				if _, err := config.ParseHostIP(v); err != nil {
 					return err
 				}
 			}

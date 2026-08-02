@@ -182,12 +182,17 @@ func (m model) linkSummary(l discovery.Link) string {
 }
 
 func (m model) linkDetail(l discovery.Link) string {
-	addrs := "no IPv4 address"
-	if v4 := l.IPv4(); len(v4) > 0 {
-		parts := make([]string, len(v4))
-		for i, p := range v4 {
-			parts[i] = p.String()
+	var parts []string
+	for _, p := range l.Addrs {
+		// Every IPv6 interface has a link-local address; listing them all is
+		// noise, so show only the routable ones alongside the IPv4 addresses.
+		if p.Addr().Is6() && p.Addr().IsLinkLocalUnicast() {
+			continue
 		}
+		parts = append(parts, p.String())
+	}
+	addrs := "no IP address"
+	if len(parts) > 0 {
 		addrs = strings.Join(parts, ", ")
 	}
 	return fmt.Sprintf("%s · %s · %d queues", l.MAC, addrs, l.RxQueues)

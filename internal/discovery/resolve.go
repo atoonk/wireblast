@@ -14,7 +14,7 @@ import (
 // generatorAddresses is how many distinct destinations a prefix contributes.
 // It defers to the generator so this guard cannot drift from the addresses the
 // run would actually send to.
-func generatorAddresses(p netip.Prefix) uint32 { return generator.UsableAddresses(p) }
+func generatorAddresses(p netip.Prefix) uint64 { return generator.UsableAddresses(p) }
 
 // DefaultProbeTimeout is how long an active ARP probe waits for an answer
 // before giving up. Long enough for a switched LAN, short enough that a
@@ -30,6 +30,7 @@ const (
 	MACFromFlag     MACSource = "given with --dst-mac"
 	MACFromNeighbor MACSource = "from the neighbour table"
 	MACFromARP      MACSource = "resolved by ARP"
+	MACFromND       MACSource = "resolved by neighbour discovery"
 	MACFromGateway  MACSource = "gateway's MAC"
 	MACPreserved    MACSource = "not needed (the capture's own MACs are preserved)"
 	MACNotNeeded    MACSource = "not needed"
@@ -230,17 +231,25 @@ func resolveDst(s Source, r *Resolved, cfg *config.Config, opts Options) error {
 // as the destination, since that is the one return traffic can come back to.
 func resolveSrcIP(r *Resolved, cfg *config.Config, dst netip.Prefix) error {
 	if cfg.SrcIP != "" {
-		ip, err := config.ParseIPv4(cfg.SrcIP)
+		ip, err := config.ParseHostIP(cfg.SrcIP)
 		if err != nil {
 			return fmt.Errorf("--src-ip: %w", err)
 		}
 		r.SrcIP = ip
 		return nil
 	}
-	addrs := r.L3Link.IPv4()
+	v6 := dst.Addr().Is6()
+	addrs := r.L3Link.addrsForFamily(v6)
+	if v6 {
+		addrs = orderV6Sources(addrs, dst.Addr())
+	}
+	fam := "IPv4"
+	if v6 {
+		fam = "IPv6"
+	}
 	if len(addrs) == 0 {
-		return fmt.Errorf("%s has no IPv4 address to send from; set --src-ip explicitly",
-			r.L3Link.Name)
+		return fmt.Errorf("%s has no %s address to send from; set --src-ip explicitly",
+			r.L3Link.Name, fam)
 	}
 	for _, p := range addrs {
 		if p.Contains(dst.Addr()) {
@@ -251,17 +260,20 @@ func resolveSrcIP(r *Resolved, cfg *config.Config, dst netip.Prefix) error {
 	r.SrcIP = addrs[0].Addr()
 	if len(addrs) > 1 {
 		r.Notes = append(r.Notes, fmt.Sprintf(
-			"%s has %d IPv4 addresses; using %s (override with --src-ip)",
-			r.L3Link.Name, len(addrs), r.SrcIP))
+			"%s has %d %s addresses; using %s (override with --src-ip)",
+			r.L3Link.Name, len(addrs), fam, r.SrcIP))
 	}
 	return nil
 }
 
-// SourceCandidates lists the IPv4 addresses a user may pick as the source for
-// a run, in the order the wizard should offer them: an address on the same
-// subnet as the destination first.
+// SourceCandidates lists the addresses a user may pick as the source for a run,
+// in the order the wizard should offer them: matching the destination's family
+// and scope, and on the same subnet, first.
 func SourceCandidates(l Link, dst netip.Prefix) []netip.Addr {
-	addrs := l.IPv4()
+	addrs := l.addrsForFamily(dst.Addr().Is6())
+	if dst.Addr().Is6() {
+		addrs = orderV6Sources(addrs, dst.Addr())
+	}
 	var onSubnet, rest []netip.Addr
 	for _, p := range addrs {
 		if dst.IsValid() && p.Contains(dst.Addr()) {
@@ -275,10 +287,10 @@ func SourceCandidates(l Link, dst netip.Prefix) []netip.Addr {
 
 // resolveNextHop is the decision tree for finding a destination MAC.
 func resolveNextHop(s Source, r *Resolved, dst netip.Prefix, opts Options) error {
-	single := dst.Bits() == 32
+	single := dst.Bits() == dst.Addr().BitLen() // /32 for IPv4, /128 for IPv6
 
 	// Is the destination directly connected on the interface we are using?
-	for _, p := range r.L3Link.IPv4() {
+	for _, p := range r.L3Link.addrsForFamily(dst.Addr().Is6()) {
 		if !p.Overlaps(dst) {
 			continue
 		}
@@ -396,6 +408,9 @@ func lookupMAC(s Source, r *Resolved, target netip.Addr, src MACSource, opts Opt
 		if mac, ok := neighborMAC(s, r.L3Link.Index, target); ok {
 			if src == MACFromNeighbor {
 				src = MACFromARP
+				if target.Is6() {
+					src = MACFromND
+				}
 			}
 			r.DstMAC, r.MACSource = mac, src
 			return nil
@@ -406,9 +421,13 @@ func lookupMAC(s Source, r *Resolved, target netip.Addr, src MACSource, opts Opt
 	if src == MACFromGateway {
 		what = "gateway"
 	}
+	resolution := "ARP"
+	if target.Is6() {
+		resolution = "neighbour discovery"
+	}
 	return &NeedsDstMACError{
-		Reason: fmt.Sprintf("the %s %s did not answer ARP on %s, so its MAC address is unknown.",
-			what, target, r.L3Link.Name),
+		Reason: fmt.Sprintf("the %s %s did not answer %s on %s, so its MAC address is unknown.",
+			what, target, resolution, r.L3Link.Name),
 		Suggestion: fmt.Sprintf("Check it is reachable (`ping -c1 %s`), then try again, or give "+
 			"--dst-mac directly.", target),
 	}
@@ -461,8 +480,8 @@ func bestRoute(routes []Route, dst netip.Addr) (Route, bool) {
 func splittingRoute(routes []Route, dst netip.Prefix) *Route {
 	for i := range routes {
 		r := routes[i]
-		if r.IsDefault() || !r.Dst.IsValid() || !r.Dst.Addr().Is4() {
-			continue
+		if r.IsDefault() || !r.Dst.IsValid() {
+			continue // Overlaps below is family-aware, so no need to filter here
 		}
 		if r.Dst.Bits() > dst.Bits() && dst.Overlaps(r.Dst) {
 			return &routes[i]
@@ -472,9 +491,11 @@ func splittingRoute(routes []Route, dst netip.Prefix) *Route {
 }
 
 // firstUsable is the first address the generator would send to in a prefix.
+// IPv4 skips the network address for /30 and shorter; IPv6 has no reserved
+// network address, so the masked base is usable.
 func firstUsable(p netip.Prefix) netip.Addr {
 	p = p.Masked()
-	if p.Bits() >= 31 {
+	if p.Addr().Is6() || p.Bits() >= 31 {
 		return p.Addr()
 	}
 	return p.Addr().Next()

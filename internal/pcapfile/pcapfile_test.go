@@ -246,6 +246,35 @@ func TestRejectsMalformedCaptures(t *testing.T) {
 	})
 }
 
+// A capture whose frames are individually legal but sum to more than will fit
+// in memory must be refused up front, not appended until the host OOMs. The
+// byte cap is also what keeps the uint32 record offsets from wrapping.
+func TestRejectsOversizedTotal(t *testing.T) {
+	orig := maxLoadBytes
+	defer func() { maxLoadBytes = orig }()
+	maxLoadBytes = 100 // two 64-byte frames already exceed this
+
+	path := writePcap(t, layers.LinkTypeEthernet, []capPacket{
+		{data: frame(64, 1)},
+		{data: frame(64, 2)},
+	})
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("a capture larger than the byte cap must be rejected")
+	}
+	for _, want := range []string{"bytes", "editcap"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, should mention %q", err, want)
+		}
+	}
+
+	// A capture that fits still loads.
+	small := writePcap(t, layers.LinkTypeEthernet, []capPacket{{data: frame(64, 1)}})
+	if _, err := Load(small); err != nil {
+		t.Fatalf("a capture within the cap must still load: %v", err)
+	}
+}
+
 // Frames cut short by the capture's snaplen still replay, but the user is told.
 func TestTruncatedFramesAreReported(t *testing.T) {
 	path := writePcap(t, layers.LinkTypeEthernet, []capPacket{

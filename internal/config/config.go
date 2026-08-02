@@ -59,11 +59,15 @@ const (
 	RxUDPPort       RxMode = "udp-port"       // UDP to specific destination ports
 	RxTCPPort       RxMode = "tcp-port"       // TCP to specific destination ports
 	RxCIDR          RxMode = "cidr"           // traffic sourced from a CIDR
-	RxAll           RxMode = "all"            // everything — dangerous
+	// RxKeepManagement takes everything except the traffic that keeps the box
+	// reachable: SSH and DNS to and from this host, plus ARP and IPv6 ND. It is
+	// the safe way to capture broadly on the interface you are logged in over.
+	RxKeepManagement RxMode = "keep-management"
+	RxAll            RxMode = "all" // everything, dangerous
 )
 
 // RxModes lists every receive mode, in menu order.
-var RxModes = []RxMode{RxNone, RxGeneratedFlow, RxUDPPort, RxTCPPort, RxCIDR, RxAll}
+var RxModes = []RxMode{RxNone, RxGeneratedFlow, RxUDPPort, RxTCPPort, RxCIDR, RxKeepManagement, RxAll}
 
 // PcapTiming selects how PCAP replay is paced.
 type PcapTiming string
@@ -201,7 +205,7 @@ func Default() Config {
 // transmits as fast as the NIC allows.
 func (c *Config) RateLimited() bool { return c.PPS != 0 || c.BPS != 0 }
 
-// UsesIPStack reports whether the mode builds IPv4 packets, i.e. whether the
+// UsesIPStack reports whether the mode builds IP packets, i.e. whether the
 // IP addressing, port and flow fields are meaningful.
 func (c *Config) UsesIPStack() bool {
 	return c.Mode == ModeUDP || c.Mode == ModeTCPSYN || c.Mode == ModeIMIX
@@ -250,7 +254,8 @@ func (c *Config) Validate() error {
 
 	if c.Mode == ModeReceive && c.RxMode == RxNone {
 		bad("--mode receive transmits nothing, so with --rx-mode none it would do nothing at " +
-			"all. Choose what to receive: --rx-mode generated-flow, udp-port, tcp-port, cidr or all")
+			"all. Choose what to receive: --rx-mode generated-flow, udp-port, tcp-port, cidr, " +
+			"keep-management or all")
 	}
 
 	// PCAP takes its sizes from the capture and IMIX from its own distribution,
@@ -280,20 +285,32 @@ func (c *Config) Validate() error {
 		if c.Flows < 1 {
 			bad("--flows %d is invalid; use 1 or more (1 means a single flow)", c.Flows)
 		}
+		var src netip.Addr
 		if c.SrcIP != "" {
-			if _, err := parseV4(c.SrcIP); err != nil {
-				bad("--src-ip %q is not an IPv4 address", c.SrcIP)
+			a, err := parseHostIP(c.SrcIP)
+			if err != nil {
+				bad("--src-ip %q is not an IP address", c.SrcIP)
 			}
+			src = a
 		}
 		if c.DstIP == "" {
-			bad("--dst-ip is required for --mode %s (an IPv4 address or CIDR)", c.Mode)
-		} else if _, err := ParseDst(c.DstIP); err != nil {
-			bad("--dst-ip %q is not an IPv4 address or CIDR: %v", c.DstIP, err)
+			bad("--dst-ip is required for --mode %s (an IPv4 or IPv6 address or CIDR)", c.Mode)
+		} else if dst, err := ParseDst(c.DstIP); err != nil {
+			bad("--dst-ip %q is not an IP address or CIDR: %v", c.DstIP, err)
+		} else if src.IsValid() && src.Is4() != dst.Addr().Is4() {
+			bad("--src-ip %s and --dst-ip %s are different address families; "+
+				"use the same family for both", c.SrcIP, c.DstIP)
 		}
 	}
 
 	if c.Mode == ModeRaw && (c.EtherType < 0x0600 || c.EtherType > 0xffff) {
 		bad("--ethertype 0x%04x is invalid; use 0x0600-0xffff", c.EtherType)
+	}
+
+	// PayloadByte fills the frame body; it is a single byte, so a value outside
+	// 0-255 would silently truncate rather than do what was asked.
+	if c.PayloadByte < 0 || c.PayloadByte > 255 {
+		bad("--payload-byte %d is out of range; use 0-255", c.PayloadByte)
 	}
 
 	if c.SrcMAC != "" {
@@ -339,7 +356,7 @@ func (c *Config) validateRx() []error {
 	case RxNone:
 	case RxGeneratedFlow:
 		if !c.UsesIPStack() {
-			bad("--rx-mode generated-flow needs generated IPv4 traffic; it cannot infer a "+
+			bad("--rx-mode generated-flow needs generated IP traffic; it cannot infer a "+
 				"return filter for --mode %s. Use --rx-mode udp-port, tcp-port or cidr instead", c.Mode)
 		}
 		if c.SrcIP == "" {
@@ -358,14 +375,27 @@ func (c *Config) validateRx() []error {
 	case RxCIDR:
 		if c.RxCIDR == "" {
 			bad("--rx-mode cidr needs --rx-cidr")
-		} else if _, err := netip.ParsePrefix(c.RxCIDR); err != nil {
+		} else if p, err := netip.ParsePrefix(c.RxCIDR); err != nil {
 			bad("--rx-cidr %q is not a CIDR: %v", c.RxCIDR, err)
+		} else if p.Bits() == 0 && !c.AllowMatchAll {
+			// A /0 matches every source address, i.e. every packet: the same
+			// blast radius as --rx-mode all. Gate it behind the same
+			// --allow-match-all flag so --yes cannot quietly strand the box.
+			bad("--rx-cidr %s matches every packet on %s, the same as --rx-mode all, taking SSH, "+
+				"DNS and everything else with it. Pass --allow-match-all if that is really what "+
+				"you want, or narrow the CIDR", c.RxCIDR, c.Interface)
 		}
+	case RxKeepManagement:
+		// Nothing extra to require. It takes everything except the traffic that
+		// keeps the box reachable, so it needs no ports or CIDRs, and unlike
+		// --rx-mode all it does not need --allow-match-all because it cannot
+		// strand you.
 	case RxAll:
 		if !c.AllowMatchAll {
 			bad("--rx-mode all redirects EVERY packet on %s away from the kernel, taking SSH, DNS "+
 				"and all other traffic on this interface with it. Pass --allow-match-all if "+
-				"that is really what you want", c.Interface)
+				"that is really what you want, or --rx-mode keep-management to take everything "+
+				"except SSH and DNS", c.Interface)
 		}
 	default:
 		bad("--rx-mode %q is not one of %s", c.RxMode, joinRxModes())
@@ -388,7 +418,7 @@ func (c *Config) minFrame() int {
 
 // headerBytes is the total frame size consumed by this mode's headers alone,
 // including the FCS — i.e. the smallest frame that can hold them with a
-// zero-length payload.
+// zero-length payload. The IP header is 20 bytes for IPv4, 40 for IPv6.
 func (c *Config) headerBytes() int {
 	l2 := 14
 	if c.VLAN != 0 {
@@ -396,12 +426,33 @@ func (c *Config) headerBytes() int {
 	}
 	switch c.Mode {
 	case ModeUDP, ModeIMIX:
-		return l2 + 20 + 8 + FCSLen
+		return l2 + c.ipHeaderLen() + 8 + FCSLen
 	case ModeTCPSYN:
-		return l2 + 20 + 20 + FCSLen
+		return l2 + c.ipHeaderLen() + 20 + FCSLen
 	default:
 		return l2 + FCSLen
 	}
+}
+
+// ipHeaderLen is the L3 header size for this run's address family.
+func (c *Config) ipHeaderLen() int {
+	if c.IsIPv6() {
+		return 40
+	}
+	return 20
+}
+
+// IsIPv6 reports whether the run's addressing is IPv6, inferred from the
+// destination (or, failing that, the source). Malformed input reads as IPv4,
+// which is harmless: the address validation reports the real error separately.
+func (c *Config) IsIPv6() bool {
+	if p, err := ParseDst(c.DstIP); err == nil {
+		return p.Addr().Is6()
+	}
+	if a, err := ParseHostIP(c.SrcIP); err == nil {
+		return a.Is6()
+	}
+	return false
 }
 
 func vlanNote(vlan int) string {

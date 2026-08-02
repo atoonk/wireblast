@@ -168,14 +168,27 @@ func classify(frame []byte) stats.Class {
 		}
 		et = binary.BigEndian.Uint16(frame[off:])
 	}
-	if et != packet.EtherTypeIPv4 {
-		return stats.ClassOther
+	ip := off + 2 // start of the IP header
+	switch et {
+	case packet.EtherTypeIPv4:
+		if len(frame) < ip+10 {
+			return stats.ClassOther
+		}
+		return classifyProto(frame[ip+9]) // IPv4 protocol field
+	case packet.EtherTypeIPv6:
+		if len(frame) < ip+7 {
+			return stats.ClassOther
+		}
+		// Next Header at +6. If it is an IPv6 extension header rather than the
+		// L4 protocol itself, this counts as Other; the receive path does not
+		// walk the extension-header chain.
+		return classifyProto(frame[ip+6])
 	}
-	ip := off + 2
-	if len(frame) < ip+10 {
-		return stats.ClassOther
-	}
-	switch frame[ip+9] {
+	return stats.ClassOther
+}
+
+func classifyProto(proto byte) stats.Class {
+	switch proto {
 	case packet.ProtoUDP:
 		return stats.ClassUDP
 	case packet.ProtoTCP:

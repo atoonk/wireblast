@@ -25,14 +25,21 @@ import (
 var version = "dev"
 
 func main() {
-	// Stop cleanly on Ctrl-C and SIGTERM. The second signal exits immediately,
+	// Stop cleanly on the first Ctrl-C or SIGTERM; the second exits immediately,
 	// so a wedged run can still be killed without reaching for another shell.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	//
+	// One channel counts both: the first signal cancels the context (graceful
+	// drain and detach), the second forces the exit. Registering it once, up
+	// front, means there is no window in which a signal can be lost, and the
+	// buffer of two holds both even if this goroutine is slow to run.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sig := make(chan os.Signal, 2)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sig)
 	go func() {
-		<-ctx.Done()
-		sig := make(chan os.Signal, 1)
-		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+		<-sig
+		cancel()
 		<-sig
 		fmt.Fprintln(os.Stderr, "\nwireblast: second signal, exiting now")
 		os.Exit(130)

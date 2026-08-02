@@ -81,7 +81,7 @@ func TestGeneratedFlowIsHonestAboutItsLimits(t *testing.T) {
 		}
 	}
 	limits := strings.Join(p.Limitations, " ")
-	for _, want := range []string{"IP pair only", "not ports", "IPv4 only"} {
+	for _, want := range []string{"IP pair only", "not ports"} {
 		if !strings.Contains(limits, want) {
 			t.Errorf("the limitations should say %q; got %q", want, limits)
 		}
@@ -160,6 +160,27 @@ func TestCIDRFilter(t *testing.T) {
 	if !strings.Contains(strings.Join(p.Warnings, " "), "SSH") {
 		t.Errorf("a CIDR filter should warn about losing SSH: %v", p.Warnings)
 	}
+	if p.Dangerous {
+		t.Error("a narrow CIDR is not match-all and should not be marked dangerous")
+	}
+}
+
+// A /0 cidr matches every packet, the same blast radius as --rx-mode all, so the
+// plan must mark it Dangerous to earn the extra confirmation on top of --yes.
+// (The hard --allow-match-all gate itself lives in config validation.)
+func TestCIDRSlashZeroIsDangerous(t *testing.T) {
+	for _, cidr := range []string{"0.0.0.0/0", "::/0"} {
+		cfg := cfgFor(func(c *config.Config) {
+			c.RxMode, c.RxCIDR, c.AllowMatchAll = config.RxCIDR, cidr, true
+		})
+		p, err := plan(cfg, resolved())
+		if err != nil {
+			t.Fatalf("%s: %v", cidr, err)
+		}
+		if !p.Dangerous {
+			t.Errorf("a %s cidr must be marked dangerous", cidr)
+		}
+	}
 }
 
 // Match-all is gated behind an explicit acknowledgement, and says exactly what
@@ -190,6 +211,69 @@ func TestMatchAllIsGatedAndBlunt(t *testing.T) {
 	}
 }
 
+// keep-management redirects everything but keeps the box reachable, so unlike
+// match-all it needs no acknowledgement and is not marked dangerous.
+func TestKeepManagementTakesAllButSparesTheBox(t *testing.T) {
+	cfg := cfgFor(func(c *config.Config) { c.RxMode = config.RxKeepManagement })
+	p, err := plan(cfg, resolved())
+	if err != nil {
+		t.Fatalf("keep-management should not need any extra flags: %v", err)
+	}
+	if p.Dangerous {
+		t.Error("keep-management must not be marked dangerous; it cannot strand the box")
+	}
+	if !p.KeepManagement {
+		t.Error("the plan must set KeepManagement so the runner passes WithKeepManagement")
+	}
+	if !p.Receives() {
+		t.Error("keep-management receives")
+	}
+	if len(p.Matches) != 1 {
+		t.Fatalf("expected a single match-all, got %d matches", len(p.Matches))
+	}
+	// It takes everything, but the description must promise SSH and DNS survive.
+	for _, want := range []string{"SSH", "DNS", "reachable"} {
+		if !strings.Contains(p.Redirects, want) {
+			t.Errorf("the description should mention %q: %q", want, p.Redirects)
+		}
+	}
+	if len(p.Warnings) == 0 {
+		t.Error("it should still warn that other services on the interface stop receiving")
+	}
+}
+
+// Receives() drives real behaviour (whether rx goroutines start, the UMEM
+// split, the fleet-reuse key), so it must come from an explicit field, never
+// from the human-readable Summary. This pins that: none does not receive, a
+// receiving mode does, regardless of what the summaries say.
+func TestReceivesDoesNotDependOnSummary(t *testing.T) {
+	none, err := plan(cfgFor(func(c *config.Config) { c.RxMode = config.RxNone }), resolved())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if none.Receives() {
+		t.Error("rx-mode none must not report as receiving")
+	}
+
+	got, err := plan(cfgFor(func(c *config.Config) { c.RxMode = config.RxKeepManagement }), resolved())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Receives() {
+		t.Error("a receiving mode must report as receiving")
+	}
+
+	// The value is a field, not a function of Summary: a plan that receives but
+	// whose summary happens to start with "none" must still receive, and the
+	// transmit-only plan must not, whatever its summary reads.
+	if !(FilterPlan{receives: true, Summary: "none-of-your-business"}).Receives() {
+		t.Error("Receives() must read the field, not the summary text")
+	}
+	if (FilterPlan{Summary: "udp/9000"}).Receives() {
+		t.Error("a zero receives field must mean not-receiving, whatever the summary")
+	}
+}
+
 func TestUnknownReceiveMode(t *testing.T) {
 	cfg := cfgFor(func(c *config.Config) { c.RxMode = "sniff-everything" })
 	if _, err := plan(cfg, resolved()); err == nil {
@@ -208,6 +292,7 @@ func TestEveryReceivingModeExplainsItself(t *testing.T) {
 		{config.RxUDPPort, func(c *config.Config) { c.RxPorts = []uint16{9000} }},
 		{config.RxTCPPort, func(c *config.Config) { c.RxPorts = []uint16{80} }},
 		{config.RxCIDR, func(c *config.Config) { c.RxCIDR = "10.0.0.0/8" }},
+		{config.RxKeepManagement, nil},
 		{config.RxAll, func(c *config.Config) { c.AllowMatchAll = true }},
 	}
 	for _, tt := range modes {

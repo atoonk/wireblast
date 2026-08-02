@@ -40,6 +40,9 @@ IFACE=eth1 DST=192.0.2.10 ./run.sh
 | [018-two-box-imix](018-two-box-imix) | Sender and receiver on separate machines |
 | [019-queue-scaling](019-queue-scaling) | Proving the rate limit is aggregate, not per queue |
 | [020-soak-test](020-soak-test) | Running unattended for hours |
+| [021-safe-capture](021-safe-capture) | Capture everything except SSH and DNS, safe on a shared NIC |
+| [022-ipv6-udp](022-ipv6-udp) | An IPv6 UDP blast (give it a v6 destination) |
+| [023-ipv6-flows](023-ipv6-flows) | Many IPv6 flows, cycling addresses across a /64 |
 
 ## About the receiver
 
@@ -55,6 +58,10 @@ sudo wireblast -i eth1 --mode receive --rx-mode udp-port --rx-port 9000 -d 60s
 ```
 
 Run that in a second window, on an interface you are **not** logged in over.
+
+If you need to capture broadly on the same NIC you manage the box over, use
+[021-safe-capture](021-safe-capture): `--rx-mode keep-management` takes everything
+except SSH and DNS, so it can't cut off your session.
 
 `--rx-mode all` takes every packet on the interface, including SSH. It's deliberately
 left out of these examples. If you need it, read

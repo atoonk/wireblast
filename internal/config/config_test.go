@@ -93,7 +93,16 @@ func TestValidate(t *testing.T) {
 		{"no dst", func(c *Config) { c.DstIP = "" }, "--dst-ip is required"},
 		{"bad dst", func(c *Config) { c.DstIP = "not-an-ip" }, "--dst-ip"},
 		{"dst cidr ok", func(c *Config) { c.DstIP = "10.0.0.0/24" }, ""},
-		{"dst v6", func(c *Config) { c.DstIP = "2001:db8::1" }, "not IPv4"},
+		{"ipv6 ok", func(c *Config) {
+			c.SrcIP, c.DstIP, c.PacketSize = "2001:db8::1", "2001:db8::2", 66
+		}, ""},
+		{"ipv6 cidr ok", func(c *Config) {
+			c.SrcIP, c.DstIP, c.PacketSize = "2001:db8::1", "2001:db8::/64", 66
+		}, ""},
+		{"mixed family rejected", func(c *Config) { c.DstIP = "2001:db8::1" }, "different address families"},
+		{"ipv6 needs a bigger minimum frame", func(c *Config) {
+			c.SrcIP, c.DstIP, c.PacketSize = "2001:db8::1", "2001:db8::2", 64
+		}, "use 66-9018"},
 		{"bad src", func(c *Config) { c.SrcIP = "300.1.1.1" }, "--src-ip"},
 
 		{"bad src mac", func(c *Config) { c.SrcMAC = "zz:zz" }, "--src-mac"},
@@ -103,6 +112,10 @@ func TestValidate(t *testing.T) {
 
 		{"raw ethertype low", func(c *Config) { c.Mode, c.EtherType = ModeRaw, 0x05ff }, "--ethertype"},
 		{"raw ok", func(c *Config) { c.Mode = ModeRaw }, ""},
+
+		{"payload byte high", func(c *Config) { c.PayloadByte = 999 }, "--payload-byte"},
+		{"payload byte negative", func(c *Config) { c.PayloadByte = -1 }, "--payload-byte"},
+		{"payload byte 255 ok", func(c *Config) { c.PayloadByte = 255 }, ""},
 
 		{"pcap needs file", func(c *Config) { c.Mode = ModePCAP }, "--pcap is required"},
 		{"pcap ok", func(c *Config) { c.Mode, c.PCAPFile = ModePCAP, "x.pcap" }, ""},
@@ -138,8 +151,23 @@ func TestValidate(t *testing.T) {
 		{"rx cidr needs cidr", func(c *Config) { c.RxMode = RxCIDR }, "needs --rx-cidr"},
 		{"rx cidr bad", func(c *Config) { c.RxMode, c.RxCIDR = RxCIDR, "10.0.0.1" }, "--rx-cidr"},
 		{"rx cidr ok", func(c *Config) { c.RxMode, c.RxCIDR = RxCIDR, "10.0.0.0/8" }, ""},
+		// A /0 cidr matches every packet, the same blast radius as --rx-mode all,
+		// so it is gated by the same --allow-match-all flag rather than only a
+		// soft warning that --yes bypasses.
+		{"rx cidr /0 guarded", func(c *Config) { c.RxMode, c.RxCIDR = RxCIDR, "0.0.0.0/0" }, "--allow-match-all"},
+		{"rx cidr ::/0 guarded", func(c *Config) { c.RxMode, c.RxCIDR = RxCIDR, "::/0" }, "--allow-match-all"},
+		{"rx cidr /0 allowed", func(c *Config) { c.RxMode, c.RxCIDR, c.AllowMatchAll = RxCIDR, "0.0.0.0/0", true }, ""},
 		{"rx all guarded", func(c *Config) { c.RxMode = RxAll }, "--allow-match-all"},
 		{"rx all allowed", func(c *Config) { c.RxMode, c.AllowMatchAll = RxAll, true }, ""},
+		// keep-management takes everything except SSH/DNS, so it cannot strand
+		// the box and needs no acknowledgement, no ports, no CIDR.
+		{"rx keep-management ok", func(c *Config) { c.RxMode = RxKeepManagement }, ""},
+		{"rx keep-management needs no guard", func(c *Config) {
+			c.RxMode, c.AllowMatchAll = RxKeepManagement, false
+		}, ""},
+		{"receive with keep-management ok", func(c *Config) {
+			c.Mode, c.RxMode = ModeReceive, RxKeepManagement
+		}, ""},
 		{"rx unknown", func(c *Config) { c.RxMode = "sniff" }, "--rx-mode"},
 	}
 

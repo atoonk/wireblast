@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func ip4(s string) [4]byte { return netip.MustParseAddr(s).As4() }
+func ip4(s string) netip.Addr { return netip.MustParseAddr(s) }
 
 func TestFlowSpecSequential(t *testing.T) {
 	s := FlowSpec{
@@ -140,7 +140,7 @@ func TestCIDRCoversEveryUsableHost(t *testing.T) {
 		t.Fatalf("a /24 produced %d distinct addresses, want 254", len(seen))
 	}
 	for _, forbidden := range []string{"192.0.2.0", "192.0.2.255"} {
-		if _, bad := seen[ip4(forbidden)]; bad {
+		if _, bad := seen[ip4(forbidden).As4()]; bad {
 			t.Errorf("%s (network or broadcast) must never be a destination", forbidden)
 		}
 	}
@@ -153,13 +153,15 @@ func TestCIDRCoversEveryUsableHost(t *testing.T) {
 func TestUsableAddresses(t *testing.T) {
 	tests := []struct {
 		cidr string
-		want uint32
+		want uint64
 	}{
 		{"10.0.0.1/32", 1},
 		{"10.0.0.0/31", 2},
 		{"10.0.0.0/30", 2},
 		{"10.0.0.0/24", 254},
 		{"10.0.0.0/16", 65534},
+		{"2001:db8::1/128", 1},
+		{"2001:db8::/120", 256},
 	}
 	for _, tt := range tests {
 		if got := UsableAddresses(netip.MustParsePrefix(tt.cidr)); got != tt.want {

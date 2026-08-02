@@ -52,6 +52,10 @@ type Info struct {
 	Filter    string
 	FrameSize int
 	NumFrames int
+	// Tuning is what the library did to the interface's NAPI settings to make
+	// the receive path keep up, e.g. "defer=2 flush=200ms", or "untuned". These
+	// are host settings the library restores on close; worth showing.
+	Tuning string
 	// Pattern and PacketSizes describe the traffic, e.g. "udp" and
 	// "fixed 64-byte frames".
 	Pattern     string
@@ -78,6 +82,9 @@ func (i Info) String() string {
 	}
 	if i.Filter != "" {
 		s += ", rx filter " + i.Filter
+	}
+	if i.Tuning != "" && i.Tuning != "untuned" {
+		s += ", napi " + i.Tuning
 	}
 	return s
 }
@@ -558,6 +565,11 @@ func (r *Runner) attach() error {
 			// of parking, burning cores while forwarding nothing.
 			afxdp.WithNeedWakeup(),
 		}
+		if r.plan.KeepManagement {
+			// Spare ARP, ND, SSH and DNS from the match-all redirect so the box
+			// stays reachable while everything else is captured.
+			opts = append(opts, afxdp.WithKeepManagement())
+		}
 		return afxdp.Open(r.res.Link.Name, opts...)
 	}
 
@@ -590,6 +602,7 @@ func (r *Runner) attach() error {
 		if info.Filter != "" {
 			r.info.Filter = info.Filter
 		}
+		r.info.Tuning = info.Tuning
 	}
 	return nil
 }

@@ -220,8 +220,8 @@ func TestIncrementalChecksumsStayCorrect(t *testing.T) {
 				var s, d [4]byte
 				binary.BigEndian.PutUint32(s[:], r.Uint32())
 				binary.BigEndian.PutUint32(d[:], r.Uint32())
-				tmpl.SetSrcIP(s)
-				tmpl.SetDstIP(d)
+				tmpl.SetSrcIP(netip.AddrFrom4(s))
+				tmpl.SetDstIP(netip.AddrFrom4(d))
 				tmpl.SetSrcPort(uint16(r.Uint32()))
 				tmpl.SetDstPort(uint16(r.Uint32()))
 				verify(t, tmpl)
@@ -237,8 +237,8 @@ func TestRedundantSetsAreNoOps(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := append([]byte(nil), tmpl.Bytes()...)
-	tmpl.SetSrcIP(srcIP.As4())
-	tmpl.SetDstIP(dstIP.As4())
+	tmpl.SetSrcIP(srcIP)
+	tmpl.SetDstIP(dstIP)
 	tmpl.SetSrcPort(1024)
 	tmpl.SetDstPort(9000)
 	if !bytes.Equal(before, tmpl.Bytes()) {
@@ -320,7 +320,7 @@ func TestRawEthernet(t *testing.T) {
 		}
 	}
 	// Mutators must be harmless no-ops on a frame with no IP header.
-	tmpl.SetSrcIP([4]byte{1, 2, 3, 4})
+	tmpl.SetSrcIP(netip.AddrFrom4([4]byte{1, 2, 3, 4}))
 	tmpl.SetSrcPort(1234)
 	if !bytes.Equal(b, tmpl.Bytes()) {
 		t.Error("IP mutators changed a raw Ethernet frame")
@@ -407,7 +407,7 @@ func BenchmarkFlowMutationUDP(b *testing.B) {
 	for b.Loop() {
 		i++
 		binary.BigEndian.PutUint32(ip[:], i)
-		tmpl.SetDstIP(ip)
+		tmpl.SetDstIP(netip.AddrFrom4(ip))
 		tmpl.SetSrcPort(uint16(i))
 		tmpl.WriteTo(frame)
 	}
@@ -422,7 +422,7 @@ func BenchmarkFlowMutationTCP(b *testing.B) {
 	for b.Loop() {
 		i++
 		binary.BigEndian.PutUint32(ip[:], i)
-		tmpl.SetDstIP(ip)
+		tmpl.SetDstIP(netip.AddrFrom4(ip))
 		tmpl.SetSrcPort(uint16(i))
 		tmpl.WriteTo(frame)
 	}

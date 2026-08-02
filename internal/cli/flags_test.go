@@ -151,6 +151,10 @@ func TestEtherTypeFlag(t *testing.T) {
 	if _, err := parse(t, "--ethertype", "0x1ffff"); err == nil {
 		t.Error("out-of-range EtherType should fail")
 	}
+	// Trailing garbage must be rejected, not silently truncated to 0x88b5.
+	if _, err := parse(t, "--ethertype", "0x88b5zzz"); err == nil {
+		t.Error("an EtherType with trailing junk should fail, not parse to 0x88b5")
+	}
 }
 
 func TestEnumsAreCaseInsensitive(t *testing.T) {

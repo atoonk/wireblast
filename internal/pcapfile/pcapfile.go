@@ -30,13 +30,25 @@ const (
 	// MaxFrame is the largest frame that can be transmitted. It matches the
 	// biggest UMEM frame Wireblast will configure.
 	MaxFrame = 16384
-	// MaxPackets bounds how much of a capture is loaded into memory, so
-	// pointing Wireblast at a 40 GB capture fails politely instead of
-	// exhausting the machine.
+	// MaxPackets bounds how many frames a capture may hold, so pointing
+	// Wireblast at a capture with millions of tiny records fails politely
+	// instead of exhausting the machine.
 	MaxPackets = 2_000_000
 )
 
-// record is one frame's place in the flat backing store.
+// maxLoadBytes bounds the total bytes a capture may occupy in memory. The
+// per-frame and per-count limits above are not enough on their own: two million
+// maximum-size frames would be tens of gigabytes, enough to OOM the host (which
+// this runs as root on) before the NIC is ever touched.
+//
+// It must stay below 1<<32: record offsets are stored as uint32, so a total
+// under 4 GiB is what guarantees they can never wrap. A var rather than a const
+// only so a test can lower it.
+var maxLoadBytes = 1 << 30 // 1 GiB
+
+// record is one frame's place in the flat backing store. off and len are
+// uint32 to keep the index compact for a multi-million-record capture; the
+// maxLoadBytes cap (kept below 4 GiB) is what guarantees neither can wrap.
 type record struct {
 	off uint32
 	len uint32
@@ -105,6 +117,11 @@ func Load(path string) (*File, error) {
 		if len(out.recs) >= MaxPackets {
 			return nil, fmt.Errorf("%s holds more than %d packets, which is more than Wireblast "+
 				"will load into memory. Trim it with `editcap -c %d`", path, MaxPackets, MaxPackets)
+		}
+		if len(out.data)+len(data) > maxLoadBytes {
+			return nil, fmt.Errorf("%s would load more than %d bytes into memory, more than "+
+				"Wireblast will hold. Trim it with `editcap -c N` to keep fewer packets",
+				path, maxLoadBytes)
 		}
 
 		switch {

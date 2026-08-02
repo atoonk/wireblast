@@ -46,14 +46,35 @@ type Link struct {
 }
 
 // IPv4 returns the link's IPv4 prefixes, in the order the kernel reports them.
-func (l Link) IPv4() []netip.Prefix {
+func (l Link) IPv4() []netip.Prefix { return l.addrsForFamily(false) }
+
+// addrsForFamily returns the link's prefixes of the requested family, in the
+// order the kernel reports them.
+func (l Link) addrsForFamily(v6 bool) []netip.Prefix {
 	var out []netip.Prefix
 	for _, p := range l.Addrs {
-		if p.Addr().Is4() {
+		if p.Addr().Is6() == v6 {
 			out = append(out, p)
 		}
 	}
 	return out
+}
+
+// orderV6Sources puts the source addresses of the right scope first: a
+// link-local source for a link-local destination, a routable one otherwise. A
+// link-local address is always present on an IPv6 interface but is the wrong
+// source for global traffic.
+func orderV6Sources(addrs []netip.Prefix, dst netip.Addr) []netip.Prefix {
+	dstLL := dst.IsLinkLocalUnicast()
+	var match, other []netip.Prefix
+	for _, p := range addrs {
+		if p.Addr().IsLinkLocalUnicast() == dstLL {
+			match = append(match, p)
+		} else {
+			other = append(other, p)
+		}
+	}
+	return append(match, other...)
 }
 
 // IsVLAN reports whether this is an 802.1Q sub-interface.
@@ -85,6 +106,11 @@ func (r Route) Bits() int {
 // Contains reports whether this route covers an address.
 func (r Route) Contains(a netip.Addr) bool {
 	if r.IsDefault() {
+		// A default route covers its whole family. When the prefix is set (the
+		// normal case, 0.0.0.0/0 or ::/0) match on family; otherwise assume IPv4.
+		if r.Dst.IsValid() {
+			return r.Dst.Addr().Is4() == a.Is4()
+		}
 		return a.Is4()
 	}
 	return r.Dst.Contains(a)
@@ -152,7 +178,7 @@ func Interfaces(s Source) ([]Link, error) {
 		if a.Carrier != b.Carrier {
 			return a.Carrier
 		}
-		if ai, bi := len(a.IPv4()) > 0, len(b.IPv4()) > 0; ai != bi {
+		if ai, bi := len(a.Addrs) > 0, len(b.Addrs) > 0; ai != bi {
 			return ai
 		}
 		return a.Name < b.Name

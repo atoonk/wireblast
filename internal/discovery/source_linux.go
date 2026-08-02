@@ -100,7 +100,7 @@ func countRxQueues(name string) int {
 }
 
 func (netlinkSource) Routes() ([]Route, error) {
-	rts, err := netlink.RouteList(nil, netlink.FAMILY_V4)
+	rts, err := netlink.RouteList(nil, netlink.FAMILY_ALL)
 	if err != nil {
 		return nil, fmt.Errorf("list routes: %w", err)
 	}
@@ -114,8 +114,10 @@ func (netlinkSource) Routes() ([]Route, error) {
 			}
 			ones, _ := r.Dst.Mask.Size()
 			route.Dst = netip.PrefixFrom(ip.Unmap(), ones).Masked()
+		} else if r.Family == netlink.FAMILY_V6 {
+			// A nil destination is the default route; ::/0 for IPv6.
+			route.Dst = netip.PrefixFrom(netip.IPv6Unspecified(), 0)
 		} else {
-			// A nil destination is the default route.
 			route.Dst = netip.PrefixFrom(netip.IPv4Unspecified(), 0)
 		}
 		if r.Gw != nil {
@@ -134,7 +136,7 @@ func (netlinkSource) Routes() ([]Route, error) {
 }
 
 func (netlinkSource) Neighbors(linkIndex int) ([]Neighbor, error) {
-	neighs, err := netlink.NeighList(linkIndex, netlink.FAMILY_V4)
+	neighs, err := netlink.NeighList(linkIndex, netlink.FAMILY_ALL)
 	if err != nil {
 		return nil, fmt.Errorf("list neighbours: %w", err)
 	}
@@ -158,17 +160,16 @@ func (netlinkSource) Neighbors(linkIndex int) ([]Neighbor, error) {
 	return out, nil
 }
 
-// Probe provokes ARP resolution by sending a single UDP datagram to the
+// Probe provokes neighbour resolution by sending a single UDP datagram to the
 // discard port out of the given interface, then waiting for the kernel's
-// neighbour state machine to fill in the answer.
+// neighbour state machine to fill in the answer. It works for both families:
+// the same nudge that provokes ARP for an IPv4 destination provokes IPv6
+// neighbour discovery for a v6 one, with no hand-crafted packets on our part.
 //
 // This is a read-only nudge: it adds nothing to the routing table, changes no
 // interface configuration, and the datagram itself is discarded by any host
 // that receives it.
 func (s netlinkSource) Probe(link Link, dst netip.Addr, timeout time.Duration) error {
-	if !dst.Is4() {
-		return fmt.Errorf("probe: %s is not IPv4", dst)
-	}
 	d := net.Dialer{
 		Timeout: timeout,
 		Control: func(_, _ string, c syscall.RawConn) error {
@@ -189,7 +190,7 @@ func (s netlinkSource) Probe(link Link, dst netip.Addr, timeout time.Duration) e
 
 	// Port 9 is discard (RFC 863): a packet sent there is meant to be thrown
 	// away, which is exactly what we want from a probe.
-	conn, err := d.DialContext(ctx, "udp4", net.JoinHostPort(dst.String(), "9"))
+	conn, err := d.DialContext(ctx, "udp", net.JoinHostPort(dst.String(), "9"))
 	if err != nil {
 		return fmt.Errorf("probe %s on %s: %w", dst, link.Name, err)
 	}

@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/netip"
 	"strconv"
@@ -21,32 +22,39 @@ func ParseDst(s string) (netip.Prefix, error) {
 		if err != nil {
 			return netip.Prefix{}, err
 		}
-		if !p.Addr().Is4() {
-			return netip.Prefix{}, fmt.Errorf("%s is not IPv4 (IPv6 generation is not supported yet)", s)
+		// Unmap a v4-mapped v6 prefix (::ffff:a.b.c.d/N) down to plain v4. The
+		// prefix length must then fit the unmapped address: ::ffff:10.0.0.0/104
+		// is nonsense because a v4 prefix is /0 to /32. Without this check
+		// PrefixFrom would build an invalid prefix and Masked would silently
+		// return the zero prefix, which slips past validation and only surfaces
+		// later as a baffling "addresses must be set".
+		addr := p.Addr().Unmap()
+		if p.Bits() > addr.BitLen() {
+			return netip.Prefix{}, fmt.Errorf(
+				"%s is not a valid prefix: a v4-mapped address takes /0 to /%d, not /%d",
+				s, addr.BitLen(), p.Bits())
 		}
-		return p.Masked(), nil
+		return netip.PrefixFrom(addr, p.Bits()).Masked(), nil
 	}
-	a, err := parseV4(s)
+	a, err := parseHostIP(s)
 	if err != nil {
 		return netip.Prefix{}, err
 	}
-	return netip.PrefixFrom(a, 32), nil
+	return netip.PrefixFrom(a, a.BitLen()), nil // /32 for v4, /128 for v6
 }
 
-// parseV4 parses a bare IPv4 address.
-func parseV4(s string) (netip.Addr, error) {
+// parseHostIP parses a bare IPv4 or IPv6 address, normalising a v4-mapped v6
+// address to plain v4.
+func parseHostIP(s string) (netip.Addr, error) {
 	a, err := netip.ParseAddr(strings.TrimSpace(s))
 	if err != nil {
 		return netip.Addr{}, err
 	}
-	if !a.Is4() {
-		return netip.Addr{}, fmt.Errorf("%s is not IPv4 (IPv6 generation is not supported yet)", s)
-	}
-	return a, nil
+	return a.Unmap(), nil
 }
 
-// ParseIPv4 parses a bare IPv4 address, rejecting IPv6 with a clear message.
-func ParseIPv4(s string) (netip.Addr, error) { return parseV4(s) }
+// ParseHostIP parses a bare IPv4 or IPv6 address.
+func ParseHostIP(s string) (netip.Addr, error) { return parseHostIP(s) }
 
 // ParseMAC parses a 6-byte Ethernet hardware address.
 func ParseMAC(s string) (net.HardwareAddr, error) {
@@ -143,6 +151,9 @@ func parseRate(s, kind string, units []string) (uint64, error) {
 		if err != nil {
 			return 0, fmt.Errorf("%q is not a %s rate", s, kind)
 		}
+		if n > math.MaxUint64/mult { // mult is >= 1, so no divide-by-zero
+			return 0, fmt.Errorf("%q is too large a %s rate", s, kind)
+		}
 		return n * mult, nil
 	}
 	f, err := strconv.ParseFloat(t, 64)
@@ -151,6 +162,11 @@ func parseRate(s, kind string, units []string) (uint64, error) {
 	}
 	if f < 0 {
 		return 0, fmt.Errorf("%q is negative", s)
+	}
+	// Converting a float that exceeds uint64 range is implementation-defined, so
+	// reject it rather than wrap to a garbage rate.
+	if prod := f * float64(mult); prod > float64(math.MaxUint64) {
+		return 0, fmt.Errorf("%q is too large a %s rate", s, kind)
 	}
 	return uint64(f * float64(mult)), nil
 }

@@ -165,6 +165,9 @@ func (m model) dashHeader(s *stats.Snapshot) string {
 	}
 	iface := fmt.Sprintf("%s · %d queue(s) · %s XDP · %s",
 		driverOr(i.Driver), i.Queues, i.XDPMode, zc)
+	if i.Tuning != "" && i.Tuning != "untuned" {
+		iface += " · napi " + i.Tuning
+	}
 	switch {
 	case i.Reused:
 		iface += " · XDP already attached"
