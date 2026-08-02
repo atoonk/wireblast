@@ -1,0 +1,55 @@
+# GoReleaser configuration for Wireblast.
+# Docs: https://goreleaser.com
+#
+# A tag push (vX.Y.Z) runs the release workflow, which invokes this to
+# cross-compile the binaries, archive them, generate checksums, and publish a
+# GitHub Release with the assets attached.
+#
+# Archive names deliberately carry no version, so that
+#   https://github.com/atoonk/wireblast/releases/latest/download/wireblast_linux_amd64.tar.gz
+# is a stable URL that always resolves to the newest release. The docs point at
+# exactly these filenames.
+version: 2
+
+project_name: wireblast
+
+builds:
+  - id: wireblast
+    main: ./cmd/wireblast
+    binary: wireblast
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - ids:
+      - wireblast
+    formats:
+      - tar.gz
+    name_template: "wireblast_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - NOTICE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+release:
+  prerelease: auto
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"

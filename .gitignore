@@ -1,0 +1,16 @@
+# Built binary (produced by `go build` in the tree)
+/wireblast
+
+# GoReleaser output
+/dist/
+
+# Go test and build artifacts
+*.test
+*.out
+*.prof
+
+# Editor and OS cruft
+.DS_Store
+*.swp
+.idea/
+.vscode/
