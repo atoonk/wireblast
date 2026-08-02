@@ -163,7 +163,9 @@ func (s *Snapshot) Summary() string {
 		fmt.Fprintf(&b, "      errors %s\n", Count(s.TotalTX.Errors))
 	}
 	b.WriteString(s.rxSummary(dur))
-	for _, p := range s.Problems {
+	// The summary is a lifetime report (like the drop count above), so it lists
+	// problems since the run started, not since the last on-screen reset.
+	for _, p := range problems(s.Kernel, Kernel{}) {
 		fmt.Fprintf(&b, "  ! %s\n", p)
 	}
 	return strings.TrimRight(b.String(), "\n")

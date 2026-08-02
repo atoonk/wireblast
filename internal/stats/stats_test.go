@@ -143,6 +143,41 @@ func TestResetIntervalKeepsLifetimeTotals(t *testing.T) {
 	}
 }
 
+// The `r` hotkey must clear the visible drop/error counter and the per-queue
+// problem lines (they come from cumulative kernel counters), while the lifetime
+// totals and the final summary keep them.
+func TestResetIntervalClearsDropsAndProblems(t *testing.T) {
+	k := Kernel{
+		RxDropped: 5, RxRingFull: 3, TxInvalidDescs: 2,
+		PerQueue: []KernelQueue{{Queue: 1, RxRingFull: 3}},
+	}
+	c := New(2, 0, func() (Kernel, error) { return k, nil })
+
+	s := c.Sample()
+	if s.RX.Drops != 8 || s.TX.Errors != 2 {
+		t.Fatalf("before reset: RX.Drops=%d TX.Errors=%d, want 8 and 2", s.RX.Drops, s.TX.Errors)
+	}
+	if len(s.Problems) != 1 {
+		t.Fatalf("before reset: want one problem line, got %v", s.Problems)
+	}
+
+	c.ResetInterval()
+	s = c.Snapshot()
+	if s.RX.Drops != 0 || s.TX.Errors != 0 {
+		t.Errorf("after reset: RX.Drops=%d TX.Errors=%d, want 0 and 0", s.RX.Drops, s.TX.Errors)
+	}
+	if len(s.Problems) != 0 {
+		t.Errorf("after reset: problem lines should clear, got %v", s.Problems)
+	}
+	// Lifetime totals and the summary are unaffected by the on-screen reset.
+	if s.TotalRX.Drops != 8 {
+		t.Errorf("TotalRX.Drops = %d, want 8 (lifetime)", s.TotalRX.Drops)
+	}
+	if !strings.Contains(s.Summary(), "queue 1") {
+		t.Errorf("summary should still name queue 1 (lifetime):\n%s", s.Summary())
+	}
+}
+
 func TestKernelCountersMerge(t *testing.T) {
 	k := Kernel{
 		Queues:    2,

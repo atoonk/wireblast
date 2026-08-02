@@ -135,8 +135,12 @@ type model struct {
 	graph graphMode
 
 	showHelp bool
-	width    int
-	height   int
+	// showProblems reveals the per-queue drop/stall lines, which are hidden by
+	// default so a NIC with many busy queues doesn't fill the dashboard with
+	// them. Toggled with 'w'.
+	showProblems bool
+	width        int
+	height       int
 }
 
 // Run opens the wizard, and then the dashboard once a run starts.
@@ -793,6 +797,8 @@ func (m model) keyRunning(key string) (tea.Model, tea.Cmd) {
 		m.runner.Collector().ResetInterval()
 	case "g":
 		m.graph = m.graph.next()
+	case "w":
+		m.showProblems = !m.showProblems
 	case "?":
 		m.showHelp = true
 	}

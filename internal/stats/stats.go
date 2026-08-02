@@ -269,12 +269,13 @@ type Collector struct {
 	state atomic.Int32
 	snap  atomic.Pointer[Snapshot]
 
-	mu       sync.Mutex
-	baseTX   Totals // counters at the last interval reset
-	baseRX   Totals
-	baseAt   time.Time
-	window   []sample // ring of recent samples, for smoothed rates
-	windowAt int
+	mu         sync.Mutex
+	baseTX     Totals // counters at the last interval reset
+	baseRX     Totals
+	baseKernel Kernel // kernel drop/error counters at the last interval reset
+	baseAt     time.Time
+	window     []sample // ring of recent samples, for smoothed rates
+	windowAt   int
 
 	// history is a ring of per-second rates. historyN counts how many points
 	// have been written, so a partly-filled ring reads back in the right order.
@@ -385,8 +386,15 @@ func (c *Collector) MarkStart() {
 // untouched. This is the `r` hotkey.
 func (c *Collector) ResetInterval() {
 	tx, rx := c.readTotals()
+	k := c.readKernel()
+	// The kernel-sourced drops and errors are cumulative and only merged into the
+	// totals in build(), so fold them into the baseline here too. Otherwise the
+	// Errors/Drops counter and the per-queue problem lines would keep showing the
+	// lifetime figure and never clear on reset.
+	tx.Errors += k.TxInvalidDescs
+	rx.Drops = k.RxDropped + k.RxRingFull
 	c.mu.Lock()
-	c.baseTX, c.baseRX, c.baseAt = tx, rx, c.now()
+	c.baseTX, c.baseRX, c.baseKernel, c.baseAt = tx, rx, k, c.now()
 	c.mu.Unlock()
 	c.snap.Store(c.build())
 }
@@ -438,16 +446,25 @@ func (c *Collector) readTotals() (tx, rx Totals) {
 	return tx, rx
 }
 
+// readKernel reads the current kernel counters, returning the zero value if no
+// kernel source is configured or the read fails, so a failing read never takes
+// the snapshot down with it.
+func (c *Collector) readKernel() Kernel {
+	if c.kernel == nil {
+		return Kernel{}
+	}
+	k, err := c.kernel()
+	if err != nil {
+		return Kernel{}
+	}
+	return k
+}
+
 func (c *Collector) build() *Snapshot {
 	now := c.now()
 	tx, rx := c.readTotals()
 
-	var k Kernel
-	if c.kernel != nil {
-		if got, err := c.kernel(); err == nil {
-			k = got
-		}
-	}
+	k := c.readKernel()
 	rx.Drops = k.RxDropped + k.RxRingFull
 	tx.Errors += k.TxInvalidDescs
 
@@ -464,6 +481,7 @@ func (c *Collector) build() *Snapshot {
 	s.Elapsed = now.Sub(c.start)
 	s.TX = tx.sub(c.baseTX)
 	s.RX = rx.sub(c.baseRX)
+	baseKernel := c.baseKernel
 	s.IntervalSince = c.baseAt
 
 	// Rates come from the oldest sample still in the window, so they are
@@ -495,7 +513,7 @@ func (c *Collector) build() *Snapshot {
 	s.History = c.historyLocked()
 	c.mu.Unlock()
 
-	s.Problems = problems(k)
+	s.Problems = problems(k, baseKernel)
 	return s
 }
 
@@ -530,14 +548,21 @@ func rateOver(now, then Totals, dt float64) Rates {
 
 // problems turns the per-queue kernel counters into short, displayable
 // descriptions of queues that are losing packets.
-func problems(k Kernel) []string {
+// problems names queues that are dropping or stalling, counting only what has
+// happened since the last reset (base) so the `r` hotkey clears them.
+func problems(k, base Kernel) []string {
+	baseQ := make(map[int]KernelQueue, len(base.PerQueue))
+	for _, q := range base.PerQueue {
+		baseQ[q.Queue] = q
+	}
 	var out []string
 	for _, q := range k.PerQueue {
+		b := baseQ[q.Queue]
 		switch {
-		case q.RxRingFull > 0:
-			out = append(out, formatQueueProblem(q.Queue, "rx ring full", q.RxRingFull))
-		case q.RxDropped > 0:
-			out = append(out, formatQueueProblem(q.Queue, "rx dropped", q.RxDropped))
+		case q.RxRingFull > b.RxRingFull:
+			out = append(out, formatQueueProblem(q.Queue, "rx ring full", q.RxRingFull-b.RxRingFull))
+		case q.RxDropped > b.RxDropped:
+			out = append(out, formatQueueProblem(q.Queue, "rx dropped", q.RxDropped-b.RxDropped))
 		}
 	}
 	return out

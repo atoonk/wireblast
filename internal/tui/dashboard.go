@@ -326,9 +326,22 @@ func counterBlock(name string, t stats.Totals, r stats.Rates, isRx bool, width i
 func (m model) dashFooter(s *stats.Snapshot) string {
 	var b strings.Builder
 
-	// Anything a queue is unhappy about.
-	for _, p := range s.Problems {
-		b.WriteString(styleWarn.Render("  ! "+p) + "\n")
+	// Anything a queue is unhappy about. The per-queue lines are hidden by
+	// default (a NIC with many queues dropping would otherwise fill the screen)
+	// and revealed with 'w'; a one-line summary keeps them discoverable.
+	if n := len(s.Problems); n > 0 {
+		if m.showProblems {
+			for _, p := range s.Problems {
+				b.WriteString(styleWarn.Render("  ! "+p) + "\n")
+			}
+		} else {
+			noun := "queue"
+			if n > 1 {
+				noun = "queues"
+			}
+			b.WriteString(styleWarn.Render(fmt.Sprintf("  ! %d %s dropping or stalling", n, noun)) +
+				styleFaint.Render("  (w to show)") + "\n")
+		}
 	}
 	if !s.IntervalSince.IsZero() && s.TotalTX.Packets != s.TX.Packets {
 		b.WriteString(styleFaint.Render(fmt.Sprintf(
@@ -356,14 +369,21 @@ func (m model) dashFooter(s *stats.Snapshot) string {
 	if s.State == stats.StatePaused {
 		pauseLabel = "resume"
 	}
-	b.WriteString("\n" + footer(
+	hints := []string{
 		keyHint("space", pauseLabel),
 		keyHint("+/-", "rate ±10%"),
 		keyHint("g", m.graphHint()),
 		keyHint("r", "reset counters"),
-		keyHint("?", "help"),
-		keyHint("q", "stop and quit"),
-	))
+	}
+	if len(s.Problems) > 0 {
+		label := "show drops"
+		if m.showProblems {
+			label = "hide drops"
+		}
+		hints = append(hints, keyHint("w", label))
+	}
+	hints = append(hints, keyHint("?", "help"), keyHint("q", "stop and quit"))
+	b.WriteString("\n" + footer(hints...))
 	return b.String()
 }
 

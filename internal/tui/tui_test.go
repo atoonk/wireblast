@@ -1176,3 +1176,19 @@ func TestCounterColumnsNameBothBitRates(t *testing.T) {
 		}
 	}
 }
+
+// The per-queue drop/stall lines are hidden by default and toggled with 'w'.
+func TestToggleProblemsKey(t *testing.T) {
+	var m model
+	if m.showProblems {
+		t.Fatal("per-queue drop lines should be hidden by default")
+	}
+	next, _ := m.keyRunning("w")
+	if !next.(model).showProblems {
+		t.Error("w should reveal the per-queue drop lines")
+	}
+	back, _ := next.(model).keyRunning("w")
+	if back.(model).showProblems {
+		t.Error("w again should hide them")
+	}
+}
