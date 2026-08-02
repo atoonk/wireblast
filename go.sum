@@ -1,5 +1,5 @@
-github.com/atoonk/go-afxdp v0.6.0 h1:izzpFFaloeLnRbob3huRTbt893Opr0IfnPcqRxv+VnQ=
-github.com/atoonk/go-afxdp v0.6.0/go.mod h1:ipiAvzdDnAivvbR/GbOvKgEQidjDGjkeIkv1Lv0aJVU=
+github.com/atoonk/go-afxdp v0.7.0 h1:viwPQJVRlBnyhmj5tQ/ZHsrsvTwreDQiQgnouFLu8wg=
+github.com/atoonk/go-afxdp v0.7.0/go.mod h1:ipiAvzdDnAivvbR/GbOvKgEQidjDGjkeIkv1Lv0aJVU=
 github.com/atotto/clipboard v0.1.4 h1:EH0zSVneZPSuFR11BlR9YppQTVDbh5+16AmcJi4g1z4=
 github.com/atotto/clipboard v0.1.4/go.mod h1:ZY9tmq7sm5xIbd9bOK4onWV4S6X0u6GY7Vn0Yu86PYI=
 github.com/aymanbagabas/go-osc52/v2 v2.0.1 h1:HwpRHbFMcZLEVr42D4p7XBqjyuxQH5SMiErDT4WkJ2k=
