@@ -208,7 +208,7 @@ func New(cfg *config.Config, res *discovery.Resolved, opts Options) (*Runner, er
 		// packet behind an Ethernet header and a VLAN tag.
 		r.maxFrame = mtu + 18
 	}
-	r.frameSize = orDefault(opts.FrameSize, frameSizeFor(r.maxFrame))
+	r.frameSize = orDefault(opts.FrameSize, frameSizeFor(r.maxFrame, res.Link.Driver))
 
 	r.limiter = rate.New(cfg.PPS, cfg.BPS, rate.WithBatch(txBatch))
 	statsOpts := []stats.Option{}
@@ -240,13 +240,24 @@ func orDefault(v, def int) int {
 // the library default and covers everything up to a standard Ethernet frame;
 // jumbo traffic needs page-sized frames, which are also what zero-copy wants
 // on drivers that require them.
-func frameSizeFor(maxFrame int) int {
+//
+// AWS ENA's zero-copy datapath needs page-sized (4096) frames; with the default
+// 2048 the bind silently falls back to native copy. So floor at 4096 on ena,
+// which keeps our own UMEM accounting (memlock preflight, banner) consistent
+// with what the driver actually binds. Scoped to ena; other drivers keep the
+// smaller, more cache-friendly frames.
+func frameSizeFor(maxFrame int, driver string) int {
+	size := 32768
 	for _, n := range []int{2048, 4096, 8192, 16384} {
 		if maxFrame <= n {
-			return n
+			size = n
+			break
 		}
 	}
-	return 32768
+	if driver == "ena" && size < 4096 {
+		size = 4096
+	}
+	return size
 }
 
 // buildGenerators makes one generator per queue.
