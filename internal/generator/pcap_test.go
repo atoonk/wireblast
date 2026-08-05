@@ -259,8 +259,11 @@ func TestPCAPRateTimingIsNotAPacer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p, ok := g.(Pacer); ok && p.Delay() != 0 {
-		t.Errorf("rate timing should impose no delay, got %v", p.Delay())
+	// It must not merely report a zero delay: it must not be a Pacer at all, or
+	// the transmit loop sends it one packet at a time, and under a rate limit
+	// the per-packet lock traffic collapses the throughput.
+	if _, ok := g.(Pacer); ok {
+		t.Error("rate timing must not make the generator a Pacer")
 	}
 }
 

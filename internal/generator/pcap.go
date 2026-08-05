@@ -92,9 +92,25 @@ func newPCAPGen(s Spec) (Generator, error) {
 	}
 	if g.pace {
 		_, g.nextGap = g.src.Frame(0)
+		// Only a replay that honours the capture's timing is a Pacer. Wrapping
+		// it in a distinct type is what makes the transmit loop's gen.(Pacer)
+		// check mean "actually paces", not merely "is a PCAP replay". A rate-
+		// timed replay returns the bare generator, which is not a Pacer, so it
+		// goes down the batched path like every other generator. Without this
+		// split a rate-timed replay would still be sent one packet at a time,
+		// and under a rate limit the per-packet lock traffic collapses the rate.
+		return pacedPCAP{g}, nil
 	}
 	return g, nil
 }
+
+// pacedPCAP is a replay honouring the capture's own inter-packet gaps. It is
+// the only generator that implements [Pacer]; see newPCAPGen for why the two
+// timing modes are different types.
+type pacedPCAP struct{ *pcapGen }
+
+// Delay implements [Pacer]: the gap the capture recorded before the next frame.
+func (g pacedPCAP) Delay() time.Duration { return g.nextGap }
 
 func (g *pcapGen) Next(frame []byte) (int, stats.Class) {
 	if g.oneUse && g.idx >= g.src.Len() {
@@ -116,15 +132,6 @@ func (g *pcapGen) Next(frame []byte) (int, stats.Class) {
 		}
 	}
 	return n, classify(data)
-}
-
-// Delay implements [Pacer]: the gap the capture recorded before the next
-// frame. Only present when --pcap-timing original was asked for.
-func (g *pcapGen) Delay() time.Duration {
-	if !g.pace {
-		return 0
-	}
-	return g.nextGap
 }
 
 // Remaining implements [Finite] for a one-pass replay.

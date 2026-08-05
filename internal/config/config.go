@@ -330,7 +330,7 @@ func (c *Config) Validate() error {
 
 	if c.Mode == ModePCAP {
 		if c.PCAPFile == "" {
-			bad("--pcap is required for --mode pcap")
+			bad("--pcap is required for --mode pcap (the path to a .pcap or .pcapng file)")
 		}
 		if c.PCAPTiming != PcapRate && c.PCAPTiming != PcapOriginal {
 			bad("--pcap-timing %q is not one of rate, original", c.PCAPTiming)
