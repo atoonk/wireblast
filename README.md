@@ -17,6 +17,11 @@ sudo wireblast
 
 Run it with no arguments and a wizard walks you through picking an interface, a traffic pattern, and a rate. Thirty seconds later you have numbers.
 
+## Demo
+Check out the [demo video](https://www.youtube.com/watch?v=8EmxvaOR5uA) below.
+
+[![Wireblast Demo: 100 Gbps Packet Generation with AF_XDP](https://img.youtube.com/vi/8EmxvaOR5uA/maxresdefault.jpg)](https://www.youtube.com/watch?v=8EmxvaOR5uA)
+
 ## Documentation
 
 **The full documentation lives at [wireblast.mintlify.site](https://wireblast.mintlify.site).** This README is a quick start; the docs cover everything in depth:
