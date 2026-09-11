@@ -44,12 +44,48 @@ func TestDefaults(t *testing.T) {
 	if c.Queues != 0 {
 		t.Errorf("default queues = %d, want 0 (all)", c.Queues)
 	}
+	if c.StatsFile != "" || c.StatsFormat != StatsCSV {
+		t.Errorf("default stats export = file %q format %q, want disabled csv", c.StatsFile, c.StatsFormat)
+	}
 	if c.FlowOrder != FlowSequential {
 		t.Errorf("default flow-order = %q, want sequential", c.FlowOrder)
 	}
 	v := valid()
 	if err := v.Validate(); err != nil {
 		t.Fatalf("baseline config should validate: %v", err)
+	}
+}
+
+func TestStatsExportValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr bool
+	}{
+		{"disabled", func(*Config) {}, false},
+		{"csv noninteractive", func(c *Config) {
+			c.NoTUI, c.StatsFile, c.StatsFormat = true, "run.csv", StatsCSV
+		}, false},
+		{"jsonl noninteractive", func(c *Config) {
+			c.NoTUI, c.StatsFile, c.StatsFormat = true, "run.jsonl", StatsJSONL
+		}, false},
+		{"tui rejected", func(c *Config) {
+			c.StatsFile, c.StatsFormat = "run.csv", StatsCSV
+		}, true},
+		{"unknown format", func(c *Config) {
+			c.NoTUI, c.StatsFile, c.StatsFormat = true, "run.bin", StatsFormat("binary")
+		}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := valid()
+			tt.mutate(&cfg)
+			err := cfg.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
 	}
 }
 

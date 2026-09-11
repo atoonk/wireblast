@@ -119,6 +119,10 @@ in L1, so --bps 10G means 10G line rate.`,
 		"transmit queues one worker drives, round-robin (0 = per backend: 1 for AF_XDP, 4 for mlx5)")
 	f.StringVar(&cfg.IO, "io", cfg.IO,
 		"packet I/O backend: auto (default), afxdp, or mlx5 for ConnectX Direct Verbs (needs a -tags mlx5 build)")
+	f.StringVar(&cfg.StatsFile, "stats-file", cfg.StatsFile,
+		"write machine-readable statistics to a new file (requires --no-tui)")
+	f.StringVar((*string)(&cfg.StatsFormat), "stats-format", string(cfg.StatsFormat),
+		"machine-readable statistics format: csv, jsonl")
 
 	f.StringVar((*string)(&cfg.RxMode), "rx-mode", string(cfg.RxMode),
 		"what to receive through AF_XDP: "+rxModeList())
@@ -201,6 +205,10 @@ func applyOptions(cmd *cobra.Command, cfg *config.Config, opt *options) error {
 	cfg.RxMode = config.RxMode(strings.ToLower(strings.TrimSpace(string(cfg.RxMode))))
 	cfg.PCAPTiming = config.PcapTiming(strings.ToLower(strings.TrimSpace(string(cfg.PCAPTiming))))
 	cfg.FlowOrder = config.FlowOrder(strings.ToLower(strings.TrimSpace(string(cfg.FlowOrder))))
+	cfg.StatsFormat = config.StatsFormat(strings.ToLower(strings.TrimSpace(string(cfg.StatsFormat))))
+	if f.Changed("stats-format") && cfg.StatsFile == "" {
+		return fmt.Errorf("--stats-format requires --stats-file")
+	}
 
 	// Choosing --mode pcap without saying --rx-mode implies nothing about
 	// receiving, but choosing --pcap without --mode is an easy slip to catch.

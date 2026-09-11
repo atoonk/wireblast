@@ -79,6 +79,28 @@ sudo wireblast -i eth1 --dst-ip 192.0.2.10 --packet-size 512 --pps 1M -d 30s
 sudo wireblast --no-tui -i eth1 --dst-ip 192.0.2.10 --pps 1M -d 30s -y
 ```
 
+For repeatable benchmarks, `--no-tui` can also write versioned, machine-readable
+statistics without changing the human-readable output:
+
+```bash
+# CSV for spreadsheets and analysis tools (the default format)
+sudo wireblast --no-tui -i eth1 --dst-ip 192.0.2.10 -d 30s -y \
+  --stats-file run.csv
+
+# Or newline-delimited JSON for streaming consumers
+sudo wireblast --no-tui -i eth1 --dst-ip 192.0.2.10 -d 30s -y \
+  --stats-file run.jsonl --stats-format jsonl
+```
+
+The output contains one aggregate sample per second, followed by a final
+aggregate and a final record for every AF_XDP queue. It includes traffic totals,
+the most recently sampled rates, and the kernel's AF_XDP drop and ring counters.
+AF_XDP counter fields use their exact Linux UAPI names. The
+`kernel_rx_descriptors` and `kernel_tx_descriptors` fields report ring progress,
+not packet counts; one multi-buffer packet can occupy several descriptors.
+The output file must not already exist, which protects previous benchmark data
+from accidental replacement.
+
 No spare interface? A veth pair gives you a sender and a receiver on one machine, with nothing touching your real network:
 
 ```bash
@@ -199,6 +221,7 @@ The command is a thin shell; the work is in `internal/`:
 | `internal/rate` | the aggregate token-bucket rate limiter |
 | `internal/dataplane` | packet I/O: AF_XDP sockets and the XDP filter, mlx5 Direct Verbs, backend choice, the run loop |
 | `internal/stats` | atomic counters, rate snapshots, history |
+| `internal/statsexport` | versioned CSV and JSONL statistics output |
 | `internal/tui` | the interactive wizard and live dashboard (Bubble Tea) |
 | `internal/prefs` | remembers your last run under `~/.wireblast/` |
 | `internal/app` | wires a validated config into a running dataplane for `--no-tui` |

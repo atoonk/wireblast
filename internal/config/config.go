@@ -88,6 +88,14 @@ const (
 	FlowRandom     FlowOrder = "random"
 )
 
+// StatsFormat is the machine-readable stream written by --stats-file.
+type StatsFormat string
+
+const (
+	StatsCSV   StatsFormat = "csv"
+	StatsJSONL StatsFormat = "jsonl"
+)
+
 // Frame-size limits, in total Ethernet frame bytes including the 4-byte FCS.
 // See the package docs on PacketSize for exactly what that means.
 const (
@@ -174,6 +182,11 @@ type Config struct {
 	// card and AF_XDP everywhere else; the run prints which it chose.
 	IO string
 
+	// Machine-readable statistics. StatsFile being empty disables export.
+	// These describe one invocation and are never remembered by the wizard.
+	StatsFile   string
+	StatsFormat StatsFormat
+
 	// Receive behaviour.
 	RxMode  RxMode
 	RxPorts []uint16
@@ -217,6 +230,7 @@ func Default() Config {
 		PCAPLoop:        true,
 		IO:              "auto",
 		QueuesPerWorker: 0,
+		StatsFormat:     StatsCSV,
 	}
 }
 
@@ -382,6 +396,14 @@ func (c *Config) Validate() error {
 	}
 	if c.Queues < 0 {
 		bad("--queues must not be negative (0 means all available queues)")
+	}
+	if c.StatsFile != "" {
+		if !c.NoTUI {
+			bad("--stats-file is currently supported only with --no-tui")
+		}
+		if c.StatsFormat != StatsCSV && c.StatsFormat != StatsJSONL {
+			bad("--stats-format %q is not one of csv, jsonl", c.StatsFormat)
+		}
 	}
 
 	errs = append(errs, c.validateRx()...)
