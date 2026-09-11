@@ -79,6 +79,28 @@ sudo wireblast -i eth1 --dst-ip 192.0.2.10 --packet-size 512 --pps 1M -d 30s
 sudo wireblast --no-tui -i eth1 --dst-ip 192.0.2.10 --pps 1M -d 30s -y
 ```
 
+For repeatable benchmarks, `--no-tui` can also write versioned, machine-readable
+statistics without changing the human-readable output:
+
+```bash
+# CSV for spreadsheets and analysis tools (the default format)
+sudo wireblast --no-tui -i eth1 --dst-ip 192.0.2.10 -d 30s -y \
+  --stats-file run.csv
+
+# Or newline-delimited JSON for streaming consumers
+sudo wireblast --no-tui -i eth1 --dst-ip 192.0.2.10 -d 30s -y \
+  --stats-file run.jsonl --stats-format jsonl
+```
+
+The output contains one aggregate sample per second, followed by a final
+aggregate and a final record for every AF_XDP queue. It includes traffic totals,
+the most recently sampled rates, and the kernel's AF_XDP drop and ring counters.
+AF_XDP counter fields use their exact Linux UAPI names. The
+`kernel_rx_descriptors` and `kernel_tx_descriptors` fields report ring progress,
+not packet counts; one multi-buffer packet can occupy several descriptors.
+The output file must not already exist, which protects previous benchmark data
+from accidental replacement.
+
 No spare interface? A veth pair gives you a sender and a receiver on one machine, with nothing touching your real network:
 
 ```bash
@@ -93,6 +115,19 @@ sudo wireblast -i wb0 --dst-ip 10.99.0.2 --packet-size 512 --pps 100k -d 10s
 ```
 
 The [namespace lab guide](https://wireblast.mintlify.site/guides/namespace-lab) builds this out into a full sender and receiver.
+
+### AF_XDP diagnostics
+
+The default dashboard and final summary show only nonzero packet-drop counters.
+Press `w` during a run to expand the AF_XDP detail into all six Linux
+`XDP_STATISTICS` counters, with exact UAPI names, counts, rates and meanings.
+
+`rx_dropped`, `rx_ring_full`, `rx_invalid_descs` and `tx_invalid_descs` report
+drops. `rx_fill_ring_empty_descs` and `tx_ring_empty_descs` count polls that
+found an empty ring. They remain available as neutral expanded diagnostics and
+in machine-readable output, but do not appear as errors in the default views.
+See the [Linux AF_XDP documentation](https://docs.kernel.org/networking/af_xdp.html)
+and [`struct xdp_statistics`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/if_xdp.h).
 
 ## Examples
 
@@ -199,6 +234,7 @@ The command is a thin shell; the work is in `internal/`:
 | `internal/rate` | the aggregate token-bucket rate limiter |
 | `internal/dataplane` | packet I/O: AF_XDP sockets and the XDP filter, mlx5 Direct Verbs, backend choice, the run loop |
 | `internal/stats` | atomic counters, rate snapshots, history |
+| `internal/statsexport` | versioned CSV and JSONL statistics output |
 | `internal/tui` | the interactive wizard and live dashboard (Bubble Tea) |
 | `internal/prefs` | remembers your last run under `~/.wireblast/` |
 | `internal/app` | wires a validated config into a running dataplane for `--no-tui` |

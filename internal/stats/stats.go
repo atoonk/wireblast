@@ -133,13 +133,89 @@ type Kernel struct {
 }
 
 // KernelQueue is one queue's slice of the kernel counters, used to point at a
-// queue that is dropping or stalled.
+// queue that is dropping packets and to preserve per-queue diagnostics.
 type KernelQueue struct {
-	Queue      int
-	RxPackets  uint64
-	TxPackets  uint64
-	RxDropped  uint64
-	RxRingFull uint64
+	Queue           int
+	RxPackets       uint64
+	TxPackets       uint64
+	RxDropped       uint64
+	RxRingFull      uint64
+	RxFillRingEmpty uint64
+	RxInvalidDescs  uint64
+	TxInvalidDescs  uint64
+	TxRingEmpty     uint64
+}
+
+// KernelDiagnostic is one counter from Linux's XDP_STATISTICS socket option.
+// Drop distinguishes packet/descriptor drops from ring-starvation events;
+// the latter are useful pressure signals but are not packet-loss counts.
+type KernelDiagnostic struct {
+	Name      string
+	Meaning   string
+	Count     uint64
+	PerSecond float64
+	Drop      bool
+}
+
+// Diagnostics returns every XDP_STATISTICS counter in a stable display order.
+// duration is the period covered by the counts and is used only for the rate.
+func (k Kernel) Diagnostics(duration time.Duration) []KernelDiagnostic {
+	rate := func(n uint64) float64 {
+		if duration <= 0 {
+			return 0
+		}
+		return float64(n) / duration.Seconds()
+	}
+	values := []KernelDiagnostic{
+		{Name: "rx_dropped", Meaning: "RX drops for other reasons", Count: k.RxDropped, Drop: true},
+		{Name: "rx_ring_full", Meaning: "RX drops because the RX ring was full", Count: k.RxRingFull, Drop: true},
+		{Name: "rx_invalid_descs", Meaning: "RX drops due to invalid descriptors", Count: k.RxInvalidDescs, Drop: true},
+		{Name: "tx_invalid_descs", Meaning: "TX drops due to invalid descriptors", Count: k.TxInvalidDescs, Drop: true},
+		{Name: "rx_fill_ring_empty_descs", Meaning: "polls that found the fill ring empty", Count: k.RxFillRingEmpty},
+		{Name: "tx_ring_empty_descs", Meaning: "polls that found the TX ring empty (normal when idle or rate limited)", Count: k.TxRingEmpty},
+	}
+	for i := range values {
+		values[i].PerSecond = rate(values[i].Count)
+	}
+	return values
+}
+
+// Since subtracts a baseline from cumulative kernel counters. Counter resets
+// clamp at zero, and queues are matched by queue id rather than slice order.
+func (k Kernel) Since(base Kernel) Kernel {
+	sub := func(x, y uint64) uint64 {
+		if x < y {
+			return 0
+		}
+		return x - y
+	}
+	out := Kernel{
+		Queues:          k.Queues,
+		RxPackets:       sub(k.RxPackets, base.RxPackets),
+		TxPackets:       sub(k.TxPackets, base.TxPackets),
+		RxDropped:       sub(k.RxDropped, base.RxDropped),
+		RxRingFull:      sub(k.RxRingFull, base.RxRingFull),
+		RxFillRingEmpty: sub(k.RxFillRingEmpty, base.RxFillRingEmpty),
+		RxInvalidDescs:  sub(k.RxInvalidDescs, base.RxInvalidDescs),
+		TxInvalidDescs:  sub(k.TxInvalidDescs, base.TxInvalidDescs),
+		TxRingEmpty:     sub(k.TxRingEmpty, base.TxRingEmpty),
+		PerQueue:        make([]KernelQueue, 0, len(k.PerQueue)),
+	}
+	baseQ := make(map[int]KernelQueue, len(base.PerQueue))
+	for _, q := range base.PerQueue {
+		baseQ[q.Queue] = q
+	}
+	for _, q := range k.PerQueue {
+		b := baseQ[q.Queue]
+		out.PerQueue = append(out.PerQueue, KernelQueue{
+			Queue: q.Queue, RxPackets: sub(q.RxPackets, b.RxPackets), TxPackets: sub(q.TxPackets, b.TxPackets),
+			RxDropped: sub(q.RxDropped, b.RxDropped), RxRingFull: sub(q.RxRingFull, b.RxRingFull),
+			RxFillRingEmpty: sub(q.RxFillRingEmpty, b.RxFillRingEmpty),
+			RxInvalidDescs:  sub(q.RxInvalidDescs, b.RxInvalidDescs),
+			TxInvalidDescs:  sub(q.TxInvalidDescs, b.TxInvalidDescs), TxRingEmpty: sub(q.TxRingEmpty, b.TxRingEmpty),
+		})
+	}
+	return out
 }
 
 // KernelFunc reports the current kernel counters. It is injected so the
@@ -243,9 +319,10 @@ type Snapshot struct {
 	// IntervalSince is when the visible counters were last reset.
 	IntervalSince time.Time
 
-	Kernel Kernel
+	Kernel         Kernel // lifetime counters for this run
+	KernelInterval Kernel // counters since the last on-screen reset
 
-	// Problems names queues that are dropping or stalled, ready to display.
+	// Problems names queues with actionable drop counters, ready to display.
 	Problems []string
 
 	// Transmits is false for a receive-only run, so the status line can leave
@@ -392,7 +469,7 @@ func (c *Collector) ResetInterval() {
 	// Errors/Drops counter and the per-queue problem lines would keep showing the
 	// lifetime figure and never clear on reset.
 	tx.Errors += k.TxInvalidDescs
-	rx.Drops = k.RxDropped + k.RxRingFull
+	rx.Drops = k.RxDropped + k.RxRingFull + k.RxInvalidDescs
 	c.mu.Lock()
 	c.baseTX, c.baseRX, c.baseKernel, c.baseAt = tx, rx, k, c.now()
 	c.mu.Unlock()
@@ -465,7 +542,7 @@ func (c *Collector) build() *Snapshot {
 	tx, rx := c.readTotals()
 
 	k := c.readKernel()
-	rx.Drops = k.RxDropped + k.RxRingFull
+	rx.Drops = k.RxDropped + k.RxRingFull + k.RxInvalidDescs
 	tx.Errors += k.TxInvalidDescs
 
 	s := &Snapshot{
@@ -514,6 +591,7 @@ func (c *Collector) build() *Snapshot {
 	c.mu.Unlock()
 
 	s.Problems = problems(k, baseKernel)
+	s.KernelInterval = k.Since(baseKernel)
 	return s
 }
 
@@ -546,10 +624,9 @@ func rateOver(now, then Totals, dt float64) Rates {
 	}
 }
 
-// problems turns the per-queue kernel counters into short, displayable
-// descriptions of queues that are losing packets.
-// problems names queues that are dropping or stalling, counting only what has
-// happened since the last reset (base) so the `r` hotkey clears them.
+// problems names queues with actionable drop counters, counting only what has
+// happened since the last reset (base) so the `r` hotkey clears them. Empty-ring
+// polls are intentionally excluded because they can be normal when idle.
 func problems(k, base Kernel) []string {
 	baseQ := make(map[int]KernelQueue, len(base.PerQueue))
 	for _, q := range base.PerQueue {
@@ -558,11 +635,17 @@ func problems(k, base Kernel) []string {
 	var out []string
 	for _, q := range k.PerQueue {
 		b := baseQ[q.Queue]
-		switch {
-		case q.RxRingFull > b.RxRingFull:
-			out = append(out, formatQueueProblem(q.Queue, "rx ring full", q.RxRingFull-b.RxRingFull))
-		case q.RxDropped > b.RxDropped:
+		if q.RxDropped > b.RxDropped {
 			out = append(out, formatQueueProblem(q.Queue, "rx dropped", q.RxDropped-b.RxDropped))
+		}
+		if q.RxRingFull > b.RxRingFull {
+			out = append(out, formatQueueProblem(q.Queue, "rx ring full", q.RxRingFull-b.RxRingFull))
+		}
+		if q.RxInvalidDescs > b.RxInvalidDescs {
+			out = append(out, formatQueueProblem(q.Queue, "rx invalid descriptors", q.RxInvalidDescs-b.RxInvalidDescs))
+		}
+		if q.TxInvalidDescs > b.TxInvalidDescs {
+			out = append(out, formatQueueProblem(q.Queue, "tx invalid descriptors", q.TxInvalidDescs-b.TxInvalidDescs))
 		}
 	}
 	return out

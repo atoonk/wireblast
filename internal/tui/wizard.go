@@ -495,7 +495,7 @@ func (m model) viewHelp() string {
 		{"-", "decrease the rate by 10%"},
 		{"g", "graph: packets/sec, then bits/sec, then off"},
 		{"r", "reset the visible counters (lifetime totals are kept)"},
-		{"w", "show or hide the per-queue drop and stall lines"},
+		{"w", "show or hide AF_XDP counters and per-queue details"},
 		{"q", "stop and quit cleanly"},
 		{"ctrl+c", "the same as q"},
 	})

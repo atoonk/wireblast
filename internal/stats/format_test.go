@@ -43,6 +43,12 @@ func TestPPSAndBits(t *testing.T) {
 	if got := Bits(100e6); got != "100 Mbit/s" {
 		t.Errorf("Bits = %q, want 100 Mbit/s", got)
 	}
+	if got := PerSecond(0.25); got != "0.25/s" {
+		t.Errorf("PerSecond = %q, want 0.25/s", got)
+	}
+	if got := PerSecond(12_500); got != "12.5 k/s" {
+		t.Errorf("PerSecond = %q, want 12.5 k/s", got)
+	}
 }
 
 func TestBytesAndDuration(t *testing.T) {
@@ -95,7 +101,11 @@ func TestSnapshotLine(t *testing.T) {
 
 func TestSnapshotSummary(t *testing.T) {
 	c := New(1, 0, func() (Kernel, error) {
-		return Kernel{RxDropped: 5, PerQueue: []KernelQueue{{Queue: 0, RxDropped: 5}}}, nil
+		return Kernel{
+			RxDropped: 5, RxRingFull: 4, RxInvalidDescs: 3,
+			RxFillRingEmpty: 2, TxInvalidDescs: 1, TxRingEmpty: 6,
+			PerQueue: []KernelQueue{{Queue: 0, RxDropped: 5}},
+		}, nil
 	})
 	c.Queue(0).AddTx(700, 700*60, ClassUDP)
 	c.Queue(0).AddTx(100, 100*590, ClassTCP)
@@ -104,9 +114,18 @@ func TestSnapshotSummary(t *testing.T) {
 	s := c.Sample()
 
 	sum := s.Summary()
-	for _, want := range []string{"ran for", "tx:", "L1", "L2", "udp", "tcp", "rx:", "drops", "queue 0"} {
+	for _, want := range []string{
+		"ran for", "tx:", "L1", "L2", "udp", "tcp", "rx:", "drops", "queue 0",
+		"AF_XDP diagnostics", "rx_dropped", "rx_ring_full", "rx_invalid_descs",
+		"tx_invalid_descs", "/s",
+	} {
 		if !strings.Contains(sum, want) {
 			t.Errorf("Summary() missing %q:\n%s", want, sum)
+		}
+	}
+	for _, unwanted := range []string{"rx_fill_ring_empty_descs", "tx_ring_empty_descs"} {
+		if strings.Contains(sum, unwanted) {
+			t.Errorf("Summary() should hide informational %q:\n%s", unwanted, sum)
 		}
 	}
 	// The summary reports lifetime totals, so an interval reset is invisible.
@@ -115,5 +134,23 @@ func TestSnapshotSummary(t *testing.T) {
 	}
 	if strings.HasSuffix(sum, "\n") {
 		t.Error("Summary() should not end with a newline")
+	}
+}
+
+func TestIdleReceiverSummaryHidesEmptyRingCounters(t *testing.T) {
+	c := New(1, 0, func() (Kernel, error) {
+		return Kernel{
+			TxRingEmpty: 100,
+			PerQueue:    []KernelQueue{{Queue: 0, TxRingEmpty: 100}},
+		}, nil
+	})
+	s := c.Sample()
+	s.Transmits = false
+
+	sum := s.Summary()
+	for _, unwanted := range []string{"AF_XDP diagnostics", "tx_ring_empty_descs", "tx ring empty", "! queue"} {
+		if strings.Contains(sum, unwanted) {
+			t.Errorf("idle receiver summary should hide %q:\n%s", unwanted, sum)
+		}
 	}
 }

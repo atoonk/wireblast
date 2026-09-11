@@ -154,17 +154,17 @@ func TestSessionReportsOpenFailures(t *testing.T) {
 func TestKernelCountersAreBaselined(t *testing.T) {
 	base := stats.Kernel{
 		RxPackets: 1000, TxPackets: 2000, RxDropped: 7, RxRingFull: 3,
-		TxInvalidDescs: 1,
+		RxFillRingEmpty: 2, RxInvalidDescs: 4, TxInvalidDescs: 1, TxRingEmpty: 5,
 		PerQueue: []stats.KernelQueue{
-			{Queue: 0, RxPackets: 600, TxPackets: 1200, RxDropped: 4},
+			{Queue: 0, RxPackets: 600, TxPackets: 1200, RxDropped: 4, RxInvalidDescs: 2, TxRingEmpty: 3},
 			{Queue: 1, RxPackets: 400, TxPackets: 800, RxDropped: 3},
 		},
 	}
 	now := stats.Kernel{
 		Queues: 2, RxPackets: 1500, TxPackets: 2500, RxDropped: 9, RxRingFull: 3,
-		TxInvalidDescs: 1,
+		RxFillRingEmpty: 8, RxInvalidDescs: 7, TxInvalidDescs: 1, TxRingEmpty: 9,
 		PerQueue: []stats.KernelQueue{
-			{Queue: 0, RxPackets: 900, TxPackets: 1500, RxDropped: 5},
+			{Queue: 0, RxPackets: 900, TxPackets: 1500, RxDropped: 5, RxInvalidDescs: 7, TxRingEmpty: 9},
 			{Queue: 1, RxPackets: 600, TxPackets: 1000, RxDropped: 4},
 		},
 	}
@@ -187,6 +187,13 @@ func TestKernelCountersAreBaselined(t *testing.T) {
 	if got.PerQueue[0].RxPackets != 300 || got.PerQueue[1].RxPackets != 200 {
 		t.Errorf("per-queue = %d/%d, want 300/200",
 			got.PerQueue[0].RxPackets, got.PerQueue[1].RxPackets)
+	}
+	if got.RxFillRingEmpty != 6 || got.RxInvalidDescs != 3 || got.TxRingEmpty != 4 {
+		t.Errorf("extended counters = fill-empty %d, rx-invalid %d, tx-empty %d; want 6, 3, 4",
+			got.RxFillRingEmpty, got.RxInvalidDescs, got.TxRingEmpty)
+	}
+	if got.PerQueue[0].RxInvalidDescs != 5 || got.PerQueue[0].TxRingEmpty != 6 {
+		t.Errorf("extended per-queue counters = %+v, want rx-invalid 5 and tx-empty 6", got.PerQueue[0])
 	}
 }
 

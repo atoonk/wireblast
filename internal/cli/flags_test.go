@@ -68,6 +68,36 @@ func TestFullNonInteractiveExample(t *testing.T) {
 	}
 }
 
+func TestStatsExportFlags(t *testing.T) {
+	got, err := parse(t,
+		"--no-tui",
+		"--stats-file", "run.csv",
+		"--stats-format", "CSV",
+	)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got.StatsFile != "run.csv" || got.StatsFormat != config.StatsCSV {
+		t.Fatalf("stats export parsed as file=%q format=%q", got.StatsFile, got.StatsFormat)
+	}
+
+	got, err = parse(t,
+		"--no-tui",
+		"--stats-file", "run.jsonl",
+		"--stats-format", "jsonl",
+	)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got.StatsFormat != config.StatsJSONL {
+		t.Fatalf("stats format = %q, want jsonl", got.StatsFormat)
+	}
+
+	if _, err := parse(t, "--stats-format", "jsonl"); err == nil {
+		t.Error("--stats-format without --stats-file should fail")
+	}
+}
+
 func TestRateFlags(t *testing.T) {
 	tests := []struct {
 		args    []string
@@ -193,6 +223,7 @@ func TestEveryConfigFieldHasAFlag(t *testing.T) {
 		"duration", "pps", "bps", "queues",
 		"rx-mode", "rx-port", "rx-cidr",
 		"pcap", "pcap-timing", "pcap-loop", "pcap-memory",
+		"stats-file", "stats-format",
 		"no-tui", "start", "yes", "allow-match-all", "forget",
 	}
 	for _, name := range want {

@@ -93,13 +93,20 @@ func Prepare(cfg *config.Config, opts PrepareOptions) (*Prepared, error) {
 // RunNonInteractive validates the flags, prints what it is about to do, and
 // transmits — printing a statistics line every second and a summary at the
 // end. This is the shape scripts and CI use.
-func RunNonInteractive(ctx context.Context, cfg *config.Config, out io.Writer) error {
+func RunNonInteractive(ctx context.Context, cfg *config.Config, out io.Writer) (retErr error) {
 	logf := func(format string, args ...any) {
 		fmt.Fprintf(out, "wireblast: "+format+"\n", args...)
 	}
 	p, err := Prepare(cfg, PrepareOptions{Logf: logf})
 	if err != nil {
 		return err
+	}
+	statsOut, err := openStatsOutput(cfg)
+	if err != nil {
+		return err
+	}
+	if statsOut != nil {
+		defer func() { retErr = errors.Join(retErr, statsOut.Close()) }()
 	}
 
 	if err := p.Preflight.Err(); err != nil {
@@ -149,21 +156,24 @@ func RunNonInteractive(ctx context.Context, cfg *config.Config, out io.Writer) e
 
 	// Print a status line every second while the run proceeds.
 	reportCtx, stopReport := context.WithCancel(ctx)
-	done := make(chan struct{})
+	done := make(chan error, 1)
 	go func() {
-		defer close(done)
-		report(reportCtx, p.Runner, out)
+		done <- report(reportCtx, p.Runner, out, statsOut)
 	}()
 
 	runErr := p.Runner.Wait()
 	stopReport()
-	<-done
+	reportErr := <-done
+	var finalErr error
+	if statsOut != nil {
+		finalErr = statsOut.Final(p.Runner.Stats())
+	}
 
 	fmt.Fprintf(out, "\n%s\n", p.Runner.Stats().Summary())
-	if runErr != nil && !errors.Is(runErr, context.Canceled) {
-		return runErr
+	if errors.Is(runErr, context.Canceled) {
+		runErr = nil
 	}
-	return nil
+	return errors.Join(runErr, reportErr, finalErr)
 }
 
 // progress prints a growing line of dots while something slow happens, and
@@ -198,17 +208,23 @@ func progress(out io.Writer, what string) func() {
 }
 
 // report prints one status line a second until the run ends.
-func report(ctx context.Context, r *dataplane.Runner, out io.Writer) {
+func report(ctx context.Context, r *dataplane.Runner, out io.Writer, statsOut *statsOutput) error {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-t.C:
 			s := r.Stats()
 			if s.State == stats.StateStarting {
 				continue
+			}
+			if statsOut != nil {
+				if err := statsOut.Sample(s); err != nil {
+					r.Stop()
+					return err
+				}
 			}
 			fmt.Fprintln(out, s.Line())
 		}

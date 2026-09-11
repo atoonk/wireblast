@@ -72,6 +72,22 @@ func TestConsentIsNeverRemembered(t *testing.T) {
 	}
 }
 
+func TestStatsOutputIsNeverRemembered(t *testing.T) {
+	s := NewAt(t.TempDir())
+	c := sample()
+	c.NoTUI = true
+	c.StatsFile = "/tmp/run.jsonl"
+	c.StatsFormat = config.StatsJSONL
+	if err := s.Save(&c); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := s.Last()
+	if got.StatsFile != "" || got.StatsFormat != config.StatsCSV {
+		t.Errorf("stats output must not be remembered: file=%q format=%q", got.StatsFile, got.StatsFormat)
+	}
+}
+
 // Narrower receive modes are genuinely useful to remember, and are kept.
 func TestNarrowReceiveModesAreRemembered(t *testing.T) {
 	s := NewAt(t.TempDir())
@@ -246,11 +262,17 @@ func TestMergeNeverInheritsConsent(t *testing.T) {
 	saved.AllowMatchAll = true
 	saved.AssumeYes = true
 	saved.NoTUI = true
+	saved.StatsFile = "/tmp/old.csv"
+	saved.StatsFormat = config.StatsJSONL
 
 	flags := config.Default()
+	flags.StatsFile = "/tmp/new.csv"
 	got := Merge(flags, saved, func(string) bool { return false })
 	if got.AllowMatchAll || got.AssumeYes || got.NoTUI {
 		t.Errorf("consent flags must come from this invocation only: %+v", got)
+	}
+	if got.StatsFile != "/tmp/new.csv" || got.StatsFormat != config.StatsCSV {
+		t.Errorf("stats output must come from this invocation only: file=%q format=%q", got.StatsFile, got.StatsFormat)
 	}
 }
 

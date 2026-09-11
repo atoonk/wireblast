@@ -37,6 +37,22 @@ func PPS(v float64) string {
 	}
 }
 
+// PerSecond renders a generic event rate without calling every event a packet.
+func PerSecond(v float64) string {
+	switch {
+	case v >= 1e12:
+		return trim(v/1e12) + " T/s"
+	case v >= 1e9:
+		return trim(v/1e9) + " G/s"
+	case v >= 1e6:
+		return trim(v/1e6) + " M/s"
+	case v >= 1e3:
+		return trim(v/1e3) + " k/s"
+	default:
+		return trim(v) + "/s"
+	}
+}
+
 // Bits renders a bit rate, e.g. "9.87 Gbit/s".
 func Bits(v float64) string {
 	switch {
@@ -142,7 +158,9 @@ func (s *Snapshot) Summary() string {
 	dur := s.Elapsed.Seconds()
 	fmt.Fprintf(&b, "ran for %s\n", Duration(s.Elapsed))
 	if !s.Transmits {
-		return strings.TrimRight(b.String()+s.rxSummary(dur), "\n")
+		b.WriteString(s.rxSummary(dur))
+		b.WriteString(s.afxdpSummary())
+		return strings.TrimRight(b.String(), "\n")
 	}
 	fmt.Fprintf(&b, "  tx: %s packets, %s", Count(s.TotalTX.Packets), Bytes(s.TotalTX.Bytes))
 	if dur > 0 {
@@ -163,12 +181,31 @@ func (s *Snapshot) Summary() string {
 		fmt.Fprintf(&b, "      errors %s\n", Count(s.TotalTX.Errors))
 	}
 	b.WriteString(s.rxSummary(dur))
+	b.WriteString(s.afxdpSummary())
 	// The summary is a lifetime report (like the drop count above), so it lists
 	// problems since the run started, not since the last on-screen reset.
 	for _, p := range problems(s.Kernel, Kernel{}) {
 		fmt.Fprintf(&b, "  ! %s\n", p)
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// afxdpSummary reports only nonzero drop counters. Empty-ring polling remains
+// available in expanded TUI detail and machine-readable output, but is not an
+// actionable condition in a final human-readable report.
+func (s *Snapshot) afxdpSummary() string {
+	var b strings.Builder
+	for _, d := range s.Kernel.Diagnostics(s.Elapsed) {
+		if !d.Drop || d.Count == 0 {
+			continue
+		}
+		if b.Len() == 0 {
+			b.WriteString("  AF_XDP diagnostics:\n")
+		}
+		fmt.Fprintf(&b, "      %-25s %s (%s)  %s\n",
+			d.Name, Count(d.Count), PerSecond(d.PerSecond), d.Meaning)
+	}
+	return b.String()
 }
 
 // rxSummary renders the receive half of the final report.

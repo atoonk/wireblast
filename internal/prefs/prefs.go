@@ -188,6 +188,8 @@ func sanitise(c config.Config) config.Config {
 	c.SkipWizard = false
 	c.AssumeYes = false
 	c.AllowMatchAll = false
+	c.StatsFile = ""
+	c.StatsFormat = config.StatsCSV
 
 	// Match-all is not remembered either. It is still guarded by a
 	// confirmation, so carrying it forward would not be unsafe — but a later,
@@ -273,6 +275,8 @@ func Merge(flags config.Config, saved config.Config, changed func(flag string) b
 	out.SkipWizard = flags.SkipWizard
 	out.AssumeYes = flags.AssumeYes
 	out.AllowMatchAll = flags.AllowMatchAll
+	out.StatsFile = flags.StatsFile
+	out.StatsFormat = flags.StatsFormat
 
 	// A --bps on the command line lifts the remembered packet cap the same way
 	// it lifts the default one.

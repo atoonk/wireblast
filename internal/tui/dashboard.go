@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/atoonk/wireblast/internal/config"
+	"github.com/atoonk/wireblast/internal/dataplane"
 	"github.com/atoonk/wireblast/internal/stats"
 )
 
@@ -132,7 +133,10 @@ func (m model) graphLabel() string {
 }
 
 func (m model) dashHeader(s *stats.Snapshot) string {
-	i := m.runner.Info()
+	return m.dashHeaderWithInfo(s, m.runner.Info())
+}
+
+func (m model) dashHeaderWithInfo(s *stats.Snapshot, i dataplane.Info) string {
 	var b strings.Builder
 
 	state := styleOK.Render("running")
@@ -180,6 +184,9 @@ func (m model) dashHeader(s *stats.Snapshot) string {
 		iface += fmt.Sprintf(" · link back in %.1fs", i.LinkWait.Seconds())
 	}
 	line("interface", fmt.Sprintf("%s  %s", i.Interface, styleFaint.Render(iface)))
+	if i.NativeAttemptError != "" {
+		line("fallback", styleWarn.Render("native AF_XDP attempt failed: "+i.NativeAttemptError))
+	}
 	line("pattern", fmt.Sprintf("%s  %s", i.Pattern, styleFaint.Render(i.PacketSizes)))
 	line("rx filter", i.Filter)
 
@@ -330,22 +337,13 @@ func counterBlock(name string, t stats.Totals, r stats.Rates, isRx bool, width i
 
 func (m model) dashFooter(s *stats.Snapshot) string {
 	var b strings.Builder
+	b.WriteString(m.dashDiagnostics(s))
 
-	// Anything a queue is unhappy about. The per-queue lines are hidden by
-	// default (a NIC with many queues dropping would otherwise fill the screen)
-	// and revealed with 'w'; a one-line summary keeps them discoverable.
-	if n := len(s.Problems); n > 0 {
-		if m.showProblems {
-			for _, p := range s.Problems {
-				b.WriteString(styleWarn.Render("  ! "+p) + "\n")
-			}
-		} else {
-			noun := "queue"
-			if n > 1 {
-				noun = "queues"
-			}
-			b.WriteString(styleWarn.Render(fmt.Sprintf("  ! %d %s dropping or stalling", n, noun)) +
-				styleFaint.Render("  (w to show)") + "\n")
+	// A NIC with many unhappy queues can fill a screen, so per-queue detail is
+	// shown alongside the expanded AF_XDP counters rather than by default.
+	if m.showProblems {
+		for _, p := range s.Problems {
+			b.WriteString(styleWarn.Render("  ! "+p) + "\n")
 		}
 	}
 	if !s.IntervalSince.IsZero() && s.TotalTX.Packets != s.TX.Packets {
@@ -380,15 +378,49 @@ func (m model) dashFooter(s *stats.Snapshot) string {
 		keyHint("g", m.graphHint()),
 		keyHint("r", "reset counters"),
 	}
-	if len(s.Problems) > 0 {
-		label := "show drops"
-		if m.showProblems {
-			label = "hide drops"
-		}
-		hints = append(hints, keyHint("w", label))
+	label := "show AF_XDP"
+	if m.showProblems {
+		label = "hide AF_XDP"
 	}
+	hints = append(hints, keyHint("w", label))
 	hints = append(hints, keyHint("?", "help"), keyHint("q", "stop and quit"))
 	b.WriteString("\n" + footer(hints...))
+	return b.String()
+}
+
+// dashDiagnostics shows the kernel's AF_XDP socket counters. The collapsed
+// view reports only nonzero drop counters; pressing w reveals all six UAPI
+// counters, including informational empty-ring polling.
+func (m model) dashDiagnostics(s *stats.Snapshot) string {
+	duration := s.At.Sub(s.IntervalSince)
+	diagnostics := s.KernelInterval.Diagnostics(duration)
+	if !m.showProblems {
+		var b strings.Builder
+		for _, d := range diagnostics {
+			if !d.Drop || d.Count == 0 {
+				continue
+			}
+			if b.Len() == 0 {
+				b.WriteString(styleLabel.Render("  AF_XDP diagnostics") + "\n")
+			}
+			line := fmt.Sprintf("    %-25s %8s  %10s  %s",
+				d.Name, stats.Count(d.Count), stats.PerSecond(d.PerSecond), d.Meaning)
+			b.WriteString(styleWarn.Render(line) + "\n")
+		}
+		return b.String()
+	}
+
+	var b strings.Builder
+	b.WriteString(styleLabel.Render("  AF_XDP diagnostics") + "\n")
+	for _, d := range diagnostics {
+		line := fmt.Sprintf("    %-25s %8s  %10s  %s",
+			d.Name, stats.Count(d.Count), stats.PerSecond(d.PerSecond), d.Meaning)
+		style := styleFaint
+		if d.Drop && d.Count > 0 {
+			style = styleWarn
+		}
+		b.WriteString(style.Render(line) + "\n")
+	}
 	return b.String()
 }
 

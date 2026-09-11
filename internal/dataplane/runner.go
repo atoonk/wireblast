@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -69,9 +70,12 @@ type Info struct {
 	PerWorker int
 	XDPMode   string // "native", "generic", ...
 	ZeroCopy  bool
-	Filter    string
-	FrameSize int
-	NumFrames int
+	// NativeAttemptError is the exact error from a failed native attach or
+	// bind when the run continued successfully in generic XDP mode.
+	NativeAttemptError string
+	Filter             string
+	FrameSize          int
+	NumFrames          int
 	// MultiBuffer is true when packets are chained across several UMEM frames,
 	// which is how jumbo frames are carried. Worth showing: it is also why a
 	// jumbo run may report copy rather than zero-copy.
@@ -710,29 +714,42 @@ func (r *Runner) attach() error {
 		return errors.New("dataplane: already started")
 	}
 
+	openMode := func(mode afxdp.Option) func() (*afxdp.Fleet, error) {
+		return func() (*afxdp.Fleet, error) {
+			opts := []afxdp.Option{
+				// WithOptions replaces the whole struct, so it must come first;
+				// the options after it layer on top.
+				afxdp.WithOptions(r.umemOptions()),
+				afxdp.WithFilter(r.plan.Matches...),
+				afxdp.WithQueues(r.queues),
+				// Without need-wakeup a starved driver spins in ksoftirqd instead
+				// of parking, burning cores while forwarding nothing.
+				afxdp.WithNeedWakeup(),
+			}
+			if r.multiBuffer {
+				// Packets bigger than a frame have to chain across several. This
+				// also lets the program attach at a jumbo MTU on drivers that
+				// otherwise cap XDP to a single buffer.
+				opts = append(opts, afxdp.WithMultiBuffer())
+			}
+			if r.plan.KeepManagement {
+				// Spare ARP, ND, SSH and DNS from the match-all redirect so the box
+				// stays reachable while everything else is captured.
+				opts = append(opts, afxdp.WithKeepManagement())
+			}
+			opts = append(opts, mode)
+			return afxdp.Open(r.res.Link.Name, opts...)
+		}
+	}
+	var nativeAttemptError error
 	open := func() (*afxdp.Fleet, error) {
-		opts := []afxdp.Option{
-			// WithOptions replaces the whole struct, so it must come first;
-			// the options after it layer on top.
-			afxdp.WithOptions(r.umemOptions()),
-			afxdp.WithFilter(r.plan.Matches...),
-			afxdp.WithQueues(r.queues),
-			// Without need-wakeup a starved driver spins in ksoftirqd instead
-			// of parking, burning cores while forwarding nothing.
-			afxdp.WithNeedWakeup(),
-		}
-		if r.multiBuffer {
-			// Packets bigger than a frame have to chain across several. This
-			// also lets the program attach at a jumbo MTU on drivers that
-			// otherwise cap XDP to a single buffer.
-			opts = append(opts, afxdp.WithMultiBuffer())
-		}
-		if r.plan.KeepManagement {
-			// Spare ARP, ND, SSH and DNS from the match-all redirect so the box
-			// stays reachable while everything else is captured.
-			opts = append(opts, afxdp.WithKeepManagement())
-		}
-		return afxdp.Open(r.res.Link.Name, opts...)
+		result, err := openAFXDPNativeFirst(
+			openMode(afxdp.WithDriverMode()),
+			openMode(afxdp.WithGenericMode()),
+			r.logf,
+		)
+		nativeAttemptError = result.nativeAttemptError
+		return result.fleet, err
 	}
 
 	if r.io == "mlx5" {
@@ -779,6 +796,9 @@ func (r *Runner) attach() error {
 	r.dev = pioafxdp.NewDevice(fleet)
 	r.started = true
 	r.info.Reused = reused
+	if nativeAttemptError != nil {
+		r.info.NativeAttemptError = nativeAttemptError.Error()
+	}
 
 	if info, err := fleet.Info(); err == nil {
 		r.info.Queues = info.NumQueues
@@ -795,6 +815,53 @@ func (r *Runner) attach() error {
 		r.info.Tuning = info.Tuning
 	}
 	return nil
+}
+
+// openAFXDPNativeFirst makes the library's mode fallback visible without
+// teaching Wireblast anything about individual drivers. The native opener
+// still selects zero-copy first and native copy second. Generic mode is tried
+// only after the same attach or bind failures for which go-afxdp's automatic
+// mode would continue; validation and setup errors are returned immediately.
+func openAFXDPNativeFirst(
+	native, generic func() (*afxdp.Fleet, error),
+	logf func(string, ...any),
+) (afxdpOpenResult, error) {
+	fleet, nativeErr := native()
+	if nativeErr == nil {
+		return afxdpOpenResult{fleet: fleet}, nil
+	}
+	result := afxdpOpenResult{nativeAttemptError: nativeErr}
+	if !nativeFailureCanFallback(nativeErr) {
+		return result, nativeErr
+	}
+	logf("native AF_XDP attempt failed: %v; trying generic XDP copy mode", nativeErr)
+
+	fleet, genericErr := generic()
+	if genericErr == nil {
+		result.fleet = fleet
+		return result, nil
+	}
+	return result, errors.Join(
+		fmt.Errorf("native AF_XDP: %w", nativeErr),
+		fmt.Errorf("generic XDP copy mode: %w", genericErr),
+	)
+}
+
+type afxdpOpenResult struct {
+	fleet              *afxdp.Fleet
+	nativeAttemptError error
+}
+
+// nativeFailureCanFallback mirrors go-afxdp v0.11.0's mode loop conservatively.
+// Its forced-native Open call wraps exhausted attach and bind attempts in this
+// form; errors returned before that loop are not mode-specific and must not be
+// retried as generic XDP.
+func nativeFailureCanFallback(err error) bool {
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "afxdp: could not open ") {
+		return false
+	}
+	return strings.Contains(msg, ": native attach:") || strings.Contains(msg, ": native bind:")
 }
 
 // close releases this run's hold on the fleet.
@@ -890,11 +957,15 @@ func (r *Runner) readKernel() (stats.Kernel, error) {
 	}
 	for q, s := range fs.PerQueue {
 		k.PerQueue = append(k.PerQueue, stats.KernelQueue{
-			Queue:      q,
-			RxPackets:  s.Received,
-			TxPackets:  s.Transmitted,
-			RxDropped:  s.KernelStats.Rx_dropped,
-			RxRingFull: s.KernelStats.Rx_ring_full,
+			Queue:           q,
+			RxPackets:       s.Received,
+			TxPackets:       s.Transmitted,
+			RxDropped:       s.KernelStats.Rx_dropped,
+			RxRingFull:      s.KernelStats.Rx_ring_full,
+			RxFillRingEmpty: s.KernelStats.Rx_fill_ring_empty_descs,
+			RxInvalidDescs:  s.KernelStats.Rx_invalid_descs,
+			TxInvalidDescs:  s.KernelStats.Tx_invalid_descs,
+			TxRingEmpty:     s.KernelStats.Tx_ring_empty_descs,
 		})
 	}
 	return k, nil
@@ -918,38 +989,7 @@ func closedSocket(err error) bool {
 // baseline still holds the old totals; clamping at zero keeps that transition
 // from producing nonsense.
 func subtractKernel(a, b stats.Kernel) stats.Kernel {
-	sub := func(x, y uint64) uint64 {
-		if x < y {
-			return 0
-		}
-		return x - y
-	}
-	out := stats.Kernel{
-		Queues:          a.Queues,
-		RxPackets:       sub(a.RxPackets, b.RxPackets),
-		TxPackets:       sub(a.TxPackets, b.TxPackets),
-		RxDropped:       sub(a.RxDropped, b.RxDropped),
-		RxRingFull:      sub(a.RxRingFull, b.RxRingFull),
-		RxFillRingEmpty: sub(a.RxFillRingEmpty, b.RxFillRingEmpty),
-		RxInvalidDescs:  sub(a.RxInvalidDescs, b.RxInvalidDescs),
-		TxInvalidDescs:  sub(a.TxInvalidDescs, b.TxInvalidDescs),
-		TxRingEmpty:     sub(a.TxRingEmpty, b.TxRingEmpty),
-		PerQueue:        make([]stats.KernelQueue, 0, len(a.PerQueue)),
-	}
-	for i, q := range a.PerQueue {
-		base := stats.KernelQueue{}
-		if i < len(b.PerQueue) {
-			base = b.PerQueue[i]
-		}
-		out.PerQueue = append(out.PerQueue, stats.KernelQueue{
-			Queue:      q.Queue,
-			RxPackets:  sub(q.RxPackets, base.RxPackets),
-			TxPackets:  sub(q.TxPackets, base.TxPackets),
-			RxDropped:  sub(q.RxDropped, base.RxDropped),
-			RxRingFull: sub(q.RxRingFull, base.RxRingFull),
-		})
-	}
-	return out
+	return a.Since(b)
 }
 
 // nextPow2 rounds up to a power of two, which is what the frame region wants.

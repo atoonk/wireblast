@@ -148,14 +148,14 @@ func TestResetIntervalKeepsLifetimeTotals(t *testing.T) {
 // totals and the final summary keep them.
 func TestResetIntervalClearsDropsAndProblems(t *testing.T) {
 	k := Kernel{
-		RxDropped: 5, RxRingFull: 3, TxInvalidDescs: 2,
+		RxDropped: 5, RxRingFull: 3, RxInvalidDescs: 4, TxInvalidDescs: 2,
 		PerQueue: []KernelQueue{{Queue: 1, RxRingFull: 3}},
 	}
 	c := New(2, 0, func() (Kernel, error) { return k, nil })
 
 	s := c.Sample()
-	if s.RX.Drops != 8 || s.TX.Errors != 2 {
-		t.Fatalf("before reset: RX.Drops=%d TX.Errors=%d, want 8 and 2", s.RX.Drops, s.TX.Errors)
+	if s.RX.Drops != 12 || s.TX.Errors != 2 {
+		t.Fatalf("before reset: RX.Drops=%d TX.Errors=%d, want 12 and 2", s.RX.Drops, s.TX.Errors)
 	}
 	if len(s.Problems) != 1 {
 		t.Fatalf("before reset: want one problem line, got %v", s.Problems)
@@ -170,8 +170,8 @@ func TestResetIntervalClearsDropsAndProblems(t *testing.T) {
 		t.Errorf("after reset: problem lines should clear, got %v", s.Problems)
 	}
 	// Lifetime totals and the summary are unaffected by the on-screen reset.
-	if s.TotalRX.Drops != 8 {
-		t.Errorf("TotalRX.Drops = %d, want 8 (lifetime)", s.TotalRX.Drops)
+	if s.TotalRX.Drops != 12 {
+		t.Errorf("TotalRX.Drops = %d, want 12 (lifetime)", s.TotalRX.Drops)
 	}
 	if !strings.Contains(s.Summary(), "queue 1") {
 		t.Errorf("summary should still name queue 1 (lifetime):\n%s", s.Summary())
@@ -182,7 +182,7 @@ func TestKernelCountersMerge(t *testing.T) {
 	k := Kernel{
 		Queues:    2,
 		TxPackets: 12345,
-		RxDropped: 7, RxRingFull: 3, TxInvalidDescs: 2,
+		RxDropped: 7, RxRingFull: 3, RxInvalidDescs: 4, TxInvalidDescs: 2,
 		PerQueue: []KernelQueue{
 			{Queue: 0, RxPackets: 100},
 			{Queue: 1, RxPackets: 50, RxRingFull: 3},
@@ -193,14 +193,74 @@ func TestKernelCountersMerge(t *testing.T) {
 	if s.Kernel.TxPackets != 12345 {
 		t.Errorf("Kernel.TxPackets = %d, want 12345", s.Kernel.TxPackets)
 	}
-	if s.RX.Drops != 10 {
-		t.Errorf("RX.Drops = %d, want 10 (dropped + ring full)", s.RX.Drops)
+	if s.RX.Drops != 14 {
+		t.Errorf("RX.Drops = %d, want 14 (other + ring full + invalid descriptor)", s.RX.Drops)
 	}
 	if s.TX.Errors != 2 {
 		t.Errorf("TX.Errors = %d, want 2 (invalid tx descriptors)", s.TX.Errors)
 	}
 	if len(s.Problems) != 1 || !strings.Contains(s.Problems[0], "queue 1") {
 		t.Errorf("Problems = %v, want one entry naming queue 1", s.Problems)
+	}
+}
+
+func TestKernelDiagnosticsKeepTypesAndRatesSeparate(t *testing.T) {
+	k := Kernel{
+		RxDropped: 10, RxRingFull: 20, RxFillRingEmpty: 30,
+		RxInvalidDescs: 40, TxInvalidDescs: 50, TxRingEmpty: 60,
+	}
+	d := k.Diagnostics(10 * time.Second)
+	want := []struct {
+		name  string
+		count uint64
+		rate  float64
+		drop  bool
+	}{
+		{"rx_dropped", 10, 1, true},
+		{"rx_ring_full", 20, 2, true},
+		{"rx_invalid_descs", 40, 4, true},
+		{"tx_invalid_descs", 50, 5, true},
+		{"rx_fill_ring_empty_descs", 30, 3, false},
+		{"tx_ring_empty_descs", 60, 6, false},
+	}
+	if len(d) != len(want) {
+		t.Fatalf("Diagnostics has %d entries, want %d", len(d), len(want))
+	}
+	for i := range want {
+		if d[i].Name != want[i].name || d[i].Count != want[i].count ||
+			d[i].PerSecond != want[i].rate || d[i].Drop != want[i].drop {
+			t.Errorf("Diagnostics[%d] = %+v, want %+v", i, d[i], want[i])
+		}
+	}
+}
+
+func TestPerQueueProblemsExcludeEmptyRingPolls(t *testing.T) {
+	k := Kernel{PerQueue: []KernelQueue{{
+		Queue: 7, RxDropped: 1, RxRingFull: 2, RxInvalidDescs: 3,
+		TxInvalidDescs: 4, RxFillRingEmpty: 5, TxRingEmpty: 6,
+	}}}
+	got := problems(k, Kernel{})
+	for _, want := range []string{
+		"rx dropped", "rx ring full", "rx invalid descriptors", "tx invalid descriptors",
+	} {
+		found := false
+		for _, line := range got {
+			if strings.Contains(line, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("problems = %v, missing %q", got, want)
+		}
+	}
+	if len(got) != 4 {
+		t.Errorf("problems has %d entries, want only the four drop counters: %v", len(got), got)
+	}
+	for _, line := range got {
+		if strings.Contains(line, "ring empty") {
+			t.Errorf("empty-ring polling is informational, not a problem: %v", got)
+		}
 	}
 }
 

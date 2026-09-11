@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/atoonk/wireblast/internal/config"
+	"github.com/atoonk/wireblast/internal/dataplane"
 	"github.com/atoonk/wireblast/internal/discovery"
 	"github.com/atoonk/wireblast/internal/stats"
 )
@@ -1190,5 +1191,87 @@ func TestToggleProblemsKey(t *testing.T) {
 	back, _ := next.(model).keyRunning("w")
 	if back.(model).showProblems {
 		t.Error("w again should hide them")
+	}
+}
+
+func TestDashboardShowsTypedAFXDPDiagnostics(t *testing.T) {
+	s := &stats.Snapshot{
+		At:            time.Unix(10, 0),
+		IntervalSince: time.Unix(0, 0),
+		KernelInterval: stats.Kernel{
+			RxDropped: 10, RxRingFull: 20, RxInvalidDescs: 30,
+			TxInvalidDescs: 40, RxFillRingEmpty: 50, TxRingEmpty: 60,
+		},
+	}
+	m := model{}
+	compact := m.dashDiagnostics(s)
+	for _, want := range []string{
+		"AF_XDP diagnostics", "rx_dropped", "rx_ring_full",
+		"rx_invalid_descs", "tx_invalid_descs",
+	} {
+		if !strings.Contains(compact, want) {
+			t.Errorf("compact diagnostics missing %q:\n%s", want, compact)
+		}
+	}
+	for _, unwanted := range []string{"rx_fill_ring_empty_descs", "tx_ring_empty_descs", "ring starvation"} {
+		if strings.Contains(compact, unwanted) {
+			t.Errorf("compact diagnostics should hide %q:\n%s", unwanted, compact)
+		}
+	}
+	m.showProblems = true
+	expanded := m.dashDiagnostics(s)
+	for _, want := range []string{
+		"rx_dropped", "rx_ring_full", "rx_invalid_descs", "tx_invalid_descs",
+		"rx_fill_ring_empty_descs", "tx_ring_empty_descs", "/s",
+	} {
+		if !strings.Contains(expanded, want) {
+			t.Errorf("expanded diagnostics missing %q:\n%s", want, expanded)
+		}
+	}
+	for _, want := range []string{
+		"polls that found the fill ring empty",
+		"polls that found the TX ring empty (normal when idle or rate limited)",
+	} {
+		if !strings.Contains(expanded, want) {
+			t.Errorf("expanded diagnostics missing friendly wording %q:\n%s", want, expanded)
+		}
+	}
+}
+
+func TestIdleReceiverHidesEmptyRingCountersByDefault(t *testing.T) {
+	s := &stats.Snapshot{
+		At:            time.Unix(10, 0),
+		IntervalSince: time.Unix(0, 0),
+		KernelInterval: stats.Kernel{
+			TxRingEmpty: 100,
+		},
+	}
+
+	m := model{}
+	if got := m.dashDiagnostics(s); got != "" {
+		t.Errorf("idle receiver should have no default AF_XDP warning, got:\n%s", got)
+	}
+
+	m.showProblems = true
+	if got := m.dashDiagnostics(s); !strings.Contains(got, "tx_ring_empty_descs") {
+		t.Errorf("expanded detail should preserve tx_ring_empty_descs:\n%s", got)
+	}
+}
+
+func TestDashboardShowsExactNativeAttemptErrorAfterGenericFallback(t *testing.T) {
+	m := newTestModel(t, nil)
+	m.cfg.Mode = config.ModeReceive
+	nativeErr := "afxdp: could not open eth0 (8 queues): native bind: operation not supported"
+	view := m.dashHeaderWithInfo(&stats.Snapshot{}, dataplane.Info{
+		Interface:          "eth0",
+		Driver:             "ixgbe",
+		Queues:             8,
+		XDPMode:            "generic",
+		NativeAttemptError: nativeErr,
+	})
+	for _, want := range []string{"generic XDP", "native AF_XDP attempt failed", nativeErr} {
+		if !strings.Contains(view, want) {
+			t.Errorf("dashboard header is missing %q:\n%s", want, view)
+		}
 	}
 }

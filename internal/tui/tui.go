@@ -135,9 +135,9 @@ type model struct {
 	graph graphMode
 
 	showHelp bool
-	// showProblems reveals the per-queue drop/stall lines, which are hidden by
-	// default so a NIC with many busy queues doesn't fill the dashboard with
-	// them. Toggled with 'w'.
+	// showProblems reveals AF_XDP counter types and per-queue drop/stall lines,
+	// which are hidden by default so a many-queue NIC does not fill the screen.
+	// Toggled with 'w'.
 	showProblems bool
 	width        int
 	height       int
